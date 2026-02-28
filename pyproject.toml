@@ -13,9 +13,10 @@ dependencies = [
     "av>=12.2.0",
     "dill>=0.3.8",
     "mujoco_py>=2.0",
+    "mujoco==2.3.7",
     "gym>=0.13,<0.24",
     "dm_control>=1.0.3",
-    "cython==3.0.0a10",
+    "cython==0.29.37",
     "numba<0.60.0",
     "matplotlib<=3.7.5",
     "six",
@@ -30,7 +31,7 @@ dependencies = [
     "scikit-image<0.23.0",
     "opencv-python",
     "imagecodecs",
-    "torch>1.0.0,<2.3.0",
+    "torch>=2.0.0",
     "torchvision",]
 
 [tool.setuptools.dynamic]

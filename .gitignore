@@ -183,4 +183,5 @@ toy.py
 toy2.py
 lightning_logs/
 run.sh
-ignores/
+ignores/D4RL/
+D4RL/

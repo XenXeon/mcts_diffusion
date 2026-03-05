@@ -12,4 +12,11 @@ run:
 		-w $(WORKDIR) \
 		$(IMAGE_DEV)
 
-.PHONY: build run
+test:
+	docker run --gpus all --rm \
+		-v $(PWD):$(WORKDIR) \
+		-w $(WORKDIR) \
+		$(IMAGE_DEV) \
+		pytest tests/test_install.py -v
+
+.PHONY: build run test

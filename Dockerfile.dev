@@ -3,11 +3,12 @@ FROM cleandiffuser:base
 # Install Python deps excluding torch/torchvision (already in base as nightly)
 # Filter them out to avoid the <2.3.0 constraint overwriting the nightly build
 COPY requirements.txt /tmp/requirements.txt
-RUN grep -vE "^(torch|torchvision)" /tmp/requirements.txt \
+RUN grep -vE "^(torch|torchvision|cython)" /tmp/requirements.txt \
     | pip install --no-cache-dir -r /dev/stdin
 
 # Install D4RL from source (not on PyPI)
-RUN pip install --no-cache-dir "cython<3" \
+# Pin Cython to 0.29.x — D4RL's Cython extensions don't build with 3.x
+RUN pip install --no-cache-dir "cython==0.29.37" \
     && git clone --depth 1 https://github.com/Farama-Foundation/D4RL.git /tmp/d4rl \
     && pip install --no-cache-dir -e /tmp/d4rl
 

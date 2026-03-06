@@ -33,3 +33,11 @@ def test_d4rl_import():
     env.reset()
     obs, reward, done, info = env.step(env.action_space.sample())
     assert obs is not None
+
+
+def test_mujoco_py_import():
+    import mujoco_py  # noqa: F401
+
+
+def test_mujoco_import():
+    import mujoco  # noqa: F401

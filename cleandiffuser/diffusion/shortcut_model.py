@@ -1,3 +1,4 @@
+from copy import deepcopy
 from typing import Optional, Union, Callable
 
 import numpy as np
@@ -106,6 +107,38 @@ class ShortcutModel(DiffusionModel):
         # A sinusoidal embedding of dt (scalar in [0,1]) before map_dt is likely best.
         # See cleandiffuser/utils for SinusoidalEmbedding reference.
 
+        # Progressive teacher model: a frozen snapshot of the model updated at
+        # milestone steps. Bootstrap targets are computed using the teacher for
+        # training stability. Call update_teacher() at the right milestones
+        # from the pipeline training loop.
+        self.teacher_model = deepcopy(self.model).requires_grad_(False)
+        self.teacher_model.eval()
+
+    def update_teacher(self):
+        """Snapshot the current EMA model into the teacher model.
+
+        Call this from the pipeline training loop at milestone steps:
+            if step % (total_steps // num_shortcut_levels) == 0:
+                planner.update_teacher()
+
+        The teacher is used to generate bootstrap targets, keeping them stable
+        while the live model is still being updated.
+        """
+        self.teacher_model = deepcopy(self.model_ema).requires_grad_(False)
+        self.teacher_model.eval()
+
+    def _sample_dt_level(self, batch_size: int) -> torch.Tensor:
+        """Sample dt levels uniformly in log-space.
+
+        dt = 1 / 2^k, where k ~ Uniform{0, ..., num_shortcut_levels - 1}.
+        Returns dt as a float tensor of shape (b,) in (0, 1].
+
+        Example with num_shortcut_levels=4:
+            dt in {1.0, 0.5, 0.25, 0.125}
+        """
+        # TODO: sample k ~ Uniform{0, ..., num_shortcut_levels-1}, return 1/2^k
+        raise NotImplementedError
+
     @property
     def clip_pred(self):
         return (self.x_max is not None) or (self.x_min is not None)
@@ -165,17 +198,38 @@ class ShortcutModel(DiffusionModel):
             Scalar loss tensor.
         """
         # TODO: implement combined flow matching + bootstrap shortcut loss.
-        # Steps:
-        #   1. Split batch into flow-matching half and shortcut half.
-        #   2. Flow matching half:
-        #      - Sample t ~ Uniform[0, 1], interpolate xt = x0 + t*(x1 - x0)
-        #      - dt_fm = 0 (or very small), target velocity = x0 - x1
-        #      - Loss = MSE(model(xt, t, condition+dt_emb), target)
-        #   3. Bootstrap shortcut half:
-        #      - Sample dt level k, so dt = 2^(-k)
-        #      - Sample t, compute xt
-        #      - Run model twice at dt/2 with no_grad to get bootstrap velocity target
-        #      - Loss = MSE(model(xt, t, condition+dt_emb(dt)), bootstrap_target)
+        #
+        # Split:
+        #   n_flow = int(b * flow_matching_weight)
+        #   n_boot = b - n_flow
+        #
+        # --- Flow matching half (indices :n_flow) ---
+        #   x1 = randn_like(x0) if None
+        #   t ~ Uniform[0, 1], shape (n_flow,)
+        #   xt = x0 + t * (x1 - x0)          # interpolate
+        #   dt_fm = zeros(n_flow)              # small/zero dt for flow objective
+        #   target_vel = x0 - x1              # NOTE: check sign convention vs ContinuousRectifiedFlow
+        #   condition_fused = _get_condition_with_dt(model, condition, mask, dt_fm)
+        #   pred = model["diffusion"](xt, t, condition_fused)
+        #   loss_flow = MSE(pred, target_vel) * loss_weight * (1 - fix_mask)
+        #
+        # --- Bootstrap shortcut half (indices n_flow:) ---
+        #   dt = _sample_dt_level(n_boot)     # dt in {1, 0.5, 0.25, ...}
+        #   t ~ Uniform[0, 1-dt]              # ensure t + dt <= 1
+        #   xt = x0_boot + t * (x1_boot - x0_boot)
+        #   with torch.no_grad():
+        #       # Step 1: first half-step using teacher
+        #       cond_half = _get_condition_with_dt(teacher, condition, mask, dt/2)
+        #       v_b1 = teacher["diffusion"](xt, t, cond_half)
+        #       xt2  = xt + (dt/2) * v_b1
+        #       # Step 2: second half-step using teacher
+        #       v_b2 = teacher["diffusion"](xt2, t + dt/2, cond_half)
+        #       target_vel = (v_b1 + v_b2) / 2    # averaged bootstrap target
+        #   cond_full = _get_condition_with_dt(model, condition, mask, dt)
+        #   pred = model["diffusion"](xt, t, cond_full)
+        #   loss_boot = MSE(pred, target_vel) * loss_weight * (1 - fix_mask)
+        #
+        # return loss_flow.mean() + loss_boot.mean()
         raise NotImplementedError
 
     def update(self, x0, condition=None, update_ema=True, x1=None, **kwargs):

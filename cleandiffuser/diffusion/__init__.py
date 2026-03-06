@@ -3,3 +3,4 @@ from .diffusionsde import DiscreteDiffusionSDE, ContinuousDiffusionSDE
 from .newedm import ContinuousEDM
 from .rectifiedflow import DiscreteRectifiedFlow, ContinuousRectifiedFlow
 from .consistency_model import ContinuousConsistencyModel
+from .shortcut_model import ShortcutModel

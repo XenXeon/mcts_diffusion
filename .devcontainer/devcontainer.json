@@ -8,7 +8,7 @@
   "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind",
   "workspaceFolder": "/workspace",
   "remoteUser": "root",
-  "postCreateCommand": "echo \"PS1='✨ \\\\u@\\\\h:\\\\w\\\\# '\" >> /root/.bashrc && echo 'source /workspace/.devcontainer/welcome.sh' >> /root/.bashrc",
+  "postCreateCommand": "grep -qF 'welcome.sh' /root/.bashrc || echo 'source /workspace/.devcontainer/welcome.sh' >> /root/.bashrc",
   "customizations": {
     "vscode": {
       "extensions": [

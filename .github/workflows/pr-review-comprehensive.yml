@@ -5,10 +5,11 @@ name: PR Review with Progress Tracking
 
 on:
   pull_request:
-    types: [opened, synchronize, ready_for_review, reopened]
+    types: [labeled]
 
 jobs:
   review-with-tracking:
+    if: github.event.label.name == 'ai-review'
     runs-on: ubuntu-latest
     permissions:
       contents: read

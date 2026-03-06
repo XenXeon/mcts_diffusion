@@ -3,7 +3,6 @@ scripts/
 outputs/
 /results
 /wandb
-*.pt
 # *.ipynb
 *.gif
 *.mp4
@@ -21,8 +20,7 @@ log_files/
 log_files2/
 log_files_eval/
 mlogger_test.json
-test.py
-test.sh
+mujoco210-linux-x86_64.tar.gz
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

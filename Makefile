@@ -7,6 +7,8 @@ PIPELINE ?= veteran_d4rl_antmaze
 TASK     ?= antmaze-medium-play-v2
 PROJECT  ?= mcts_diffusion
 NAME     ?= Default
+STEP     ?=
+MODEL    ?= diffusion_veteran
 
 build:
 	docker build -f Dockerfile -t $(IMAGE_BASE) .
@@ -38,8 +40,11 @@ push:
 	docker tag $(IMAGE_DEV) $(DOCKERHUB_USER)/$(IMAGE_DEV)
 	docker push $(DOCKERHUB_USER)/$(IMAGE_DEV)
 
+upload:
+	python scripts/upload_hf.py --model $(MODEL) --task $(TASK) $(if $(STEP),--step $(STEP),)
+
 pull:
 	docker pull $(DOCKERHUB_USER)/$(IMAGE_DEV)
 	docker tag $(DOCKERHUB_USER)/$(IMAGE_DEV) $(IMAGE_DEV)
 
-.PHONY: build run test train push pull
+.PHONY: build run test train push pull upload

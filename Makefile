@@ -4,10 +4,11 @@ WORKDIR        = /workspace
 DOCKERHUB_USER = frankcholula
 
 PIPELINE ?= veteran_d4rl_antmaze
-TASK     ?= antmaze-medium-play-v2
+TASK     ?= antmaze-large-play-v2
 PROJECT  ?= mcts_diffusion
+GROUP    ?= antmaze
 NAME     ?= Default
-STEP     ?=
+STEP     ?= latest
 MODEL    ?= diffusion_veteran
 
 build:
@@ -36,6 +37,17 @@ train:
 		$(IMAGE_DEV) \
 		python pipelines/$(PIPELINE).py task=$(TASK) project=$(PROJECT) name=$(NAME)
 
+eval:
+	docker run --gpus all -it --rm \
+		-v $(PWD):$(WORKDIR) \
+		-w $(WORKDIR) \
+		-e WANDB_API_KEY=$(WANDB_API_KEY) \
+		-e WANDB_ENTITY=$(WANDB_ENTITY) \
+		$(IMAGE_DEV) \
+		python pipelines/$(PIPELINE).py \
+		mode=inference task=$(TASK) project=$(PROJECT) group=$(GROUP) name=$(NAME) \
+		planner_ckpt=$(STEP) critic_ckpt=$(STEP) policy_ckpt=$(STEP)
+
 push:
 	docker tag $(IMAGE_DEV) $(DOCKERHUB_USER)/$(IMAGE_DEV)
 	docker push $(DOCKERHUB_USER)/$(IMAGE_DEV)
@@ -47,4 +59,4 @@ pull:
 	docker pull $(DOCKERHUB_USER)/$(IMAGE_DEV)
 	docker tag $(DOCKERHUB_USER)/$(IMAGE_DEV) $(IMAGE_DEV)
 
-.PHONY: build run test train push pull upload
+.PHONY: build run test train eval push pull upload

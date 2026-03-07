@@ -2,6 +2,7 @@ dev_pipelines/
 scripts/
 outputs/
 /results
+/video_outputs
 /wandb
 # *.ipynb
 *.gif

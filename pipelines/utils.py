@@ -3,6 +3,8 @@ import time
 import uuid
 import os
 import json
+from typing import Callable
+import imageio
 import wandb
 import wandb.sdk.data_types.video as wv
 import numpy as np
@@ -30,6 +32,40 @@ def make_dir(dir_path):
     except OSError:
         pass
     return dir_path
+
+
+def render_episode(
+    env,
+    policy_fn: Callable,
+    gif_path: str,
+    max_steps: int = 1000,
+    width: int = 640,
+    height: int = 480,
+    fps: int = 20,
+):
+    """Run one episode and save a GIF.
+
+    Args:
+        env: A non-vectorized gym environment.
+        policy_fn: Callable that takes obs (np.ndarray) and returns action (np.ndarray).
+        gif_path: Output path for the GIF file.
+        max_steps: Maximum number of steps before cutting off the episode.
+        width, height: Frame dimensions for MuJoCo offscreen render.
+        fps: Frames per second for the output GIF.
+    """
+    frames = []
+    obs = env.reset()
+    for t in range(max_steps):
+        frame = env.unwrapped.sim.render(width=width, height=height, mode='offscreen')
+        frames.append(frame[::-1])
+        act = policy_fn(obs)
+        obs, _, done, _ = env.step(act)
+        print(f'[t={t}] xy: {obs[:2]}')
+        if done:
+            print(f"Goal reached at step {t}!")
+            break
+    imageio.mimsave(gif_path, frames, duration=int(1000 / fps))
+    print(f"Saved render to {gif_path}")
 
 
 def set_seed(seed: int):

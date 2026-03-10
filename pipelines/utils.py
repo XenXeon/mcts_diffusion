@@ -18,7 +18,7 @@ def parse_cfg(cfg_path: str) -> OmegaConf:
     """Parses a config file and returns an OmegaConf object."""
     base = OmegaConf.load(cfg_path)
     cli = OmegaConf.from_cli()
-    for k,v in cli.items():
+    for k, v in cli.items():
         if v == None:
             cli[k] = True
     base.merge_with(cli)
@@ -56,11 +56,11 @@ def render_episode(
     frames = []
     obs = env.reset()
     for t in range(max_steps):
-        frame = env.unwrapped.sim.render(width=width, height=height, mode='offscreen')
+        frame = env.unwrapped.sim.render(width=width, height=height, mode="offscreen")
         frames.append(frame[::-1])
         act = policy_fn(obs)
         obs, _, done, _ = env.step(act)
-        print(f'[t={t}] xy: {obs[:2]}')
+        print(f"[t={t}] xy: {obs[:2]}")
         if done:
             print(f"Goal reached at step {t}!")
             break
@@ -83,14 +83,15 @@ class Timer:
 
     def stop(self):
         return time.time() - self.tik
-    
-    
+
+
 class Logger:
     """Primary logger object. Logs in wandb."""
+
     def __init__(self, log_dir, cfg):
         self._log_dir = make_dir(log_dir)
-        self._model_dir = make_dir(self._log_dir / 'models')
-        self._video_dir = make_dir(self._log_dir / 'videos')
+        self._model_dir = make_dir(self._log_dir / "models")
+        self._video_dir = make_dir(self._log_dir / "videos")
         self._cfg = cfg
 
         wandb.init(
@@ -100,7 +101,7 @@ class Logger:
             name=cfg.exp_name,
             id=str(uuid.uuid4()),
             mode=cfg.wandb_mode,
-            dir=self._log_dir
+            dir=self._log_dir,
         )
         self._wandb = wandb
 
@@ -112,25 +113,27 @@ class Logger:
             video_env = env
         if enable:
             video_env.video_recoder.stop()
-            video_filename = os.path.join(self._video_dir, f"{video_id}_{wv.util.generate_id()}.mp4")
+            video_filename = os.path.join(
+                self._video_dir, f"{video_id}_{wv.util.generate_id()}.mp4"
+            )
             video_env.file_path = str(video_filename)
         else:
             video_env.file_path = None
-            
+
     def log(self, d, category):
-        assert category in ['train', 'inference']
-        assert 'step' in d
+        assert category in ["train", "inference"]
+        assert "step" in d
         print(f"[{d['step']}]", " / ".join(f"{k} {v:.2f}" for k, v in d.items()))
         with (self._log_dir / "metrics.jsonl").open("a") as f:
-            f.write(json.dumps({"step": d['step'], **d}) + "\n")
+            f.write(json.dumps({"step": d["step"], **d}) + "\n")
         _d = dict()
         for k, v in d.items():
             _d[category + "/" + k] = v
-        self._wandb.log(_d, step=d['step'])
-        
-    def save_agent(self, agent=None, identifier='final'):
+        self._wandb.log(_d, step=d["step"])
+
+    def save_agent(self, agent=None, identifier="final"):
         if agent:
-            fp = self._model_dir / f'model_{str(identifier)}.pt'
+            fp = self._model_dir / f"model_{str(identifier)}.pt"
             agent.save(fp)
             print(f"model_{str(identifier)} saved")
 
@@ -141,10 +144,3 @@ class Logger:
             print(f"Failed to save model: {e}")
         if self._wandb:
             self._wandb.finish()
-
-
-    
-    
-
-
-    

@@ -88,8 +88,6 @@ def pipeline(args):
     )
     planner_dataloader = DataLoader(
         planner_dataset, batch_size=args.batch_size, shuffle=True, num_workers=4, pin_memory=True, drop_last=True)
-    obs_dim, act_dim = planner_dataset.o_dim, planner_dataset.a_dim
-    
     policy_dataloader = DataLoader(
         policy_dataset, batch_size=args.batch_size, shuffle=True, num_workers=4, pin_memory=True, drop_last=True)
     obs_dim, act_dim = planner_dataset.o_dim, planner_dataset.a_dim
@@ -488,10 +486,11 @@ def pipeline(args):
             planner_prior = torch.zeros((args.planner_num_candidates, args.task.planner_horizon, planner_dim), device=args.device)
             planner_prior[:, 0, :obs_dim] = obs_tensor.repeat(args.planner_num_candidates, 1)
 
-            traj, _ = planner.sample(
-                planner_prior, solver=args.planner_solver,
-                n_samples=args.planner_num_candidates, sample_steps=args.planner_sampling_steps, use_ema=args.planner_use_ema,
-                condition_cfg=None, w_cfg=1.0, temperature=args.task.planner_temperature)
+            with torch.no_grad():
+                traj, _ = planner.sample(
+                    planner_prior, solver=args.planner_solver,
+                    n_samples=args.planner_num_candidates, sample_steps=args.planner_sampling_steps, use_ema=args.planner_use_ema,
+                    condition_cfg=None, w_cfg=1.0, temperature=args.task.planner_temperature)
 
             with torch.no_grad():
                 value = critic(traj).view(1, args.planner_num_candidates)

@@ -20,7 +20,7 @@ from cleandiffuser.nn_diffusion import DiT1d, DVInvMlp
 from cleandiffuser.nn_classifier import HalfJannerUNet1d
 from cleandiffuser.nn_diffusion import JannerUNet1d
 from cleandiffuser.utils import report_parameters, DD_RETURN_SCALE, DVHorizonCritic
-from utils import set_seed
+from utils import set_seed, render_episode
 from tqdm import tqdm
 from omegaconf import OmegaConf
 
@@ -66,11 +66,11 @@ def pipeline(args):
     base_path += f"/{args.task.env_name}/"
     
     save_path = "results/" + base_path
-    video_path = "video_outputs/" + base_path
-    
+    video_path = "video_outputs/veteran/"
+
     if os.path.exists(save_path) is False:
         os.makedirs(save_path)
-    
+
     if os.path.exists(video_path) is False:
         os.makedirs(video_path)
 
@@ -88,8 +88,6 @@ def pipeline(args):
     )
     planner_dataloader = DataLoader(
         planner_dataset, batch_size=args.batch_size, shuffle=True, num_workers=4, pin_memory=True, drop_last=True)
-    obs_dim, act_dim = planner_dataset.o_dim, planner_dataset.a_dim
-    
     policy_dataloader = DataLoader(
         policy_dataset, batch_size=args.batch_size, shuffle=True, num_workers=4, pin_memory=True, drop_last=True)
     obs_dim, act_dim = planner_dataset.o_dim, planner_dataset.a_dim
@@ -304,7 +302,7 @@ def pipeline(args):
             planner.load(save_path + f"planner_ckpt_{args.planner_ckpt}.pt")
             planner.eval()
             # load critic
-            critic_ckpt = torch.load(save_path + f"critic_ckpt_{args.critic_ckpt}.pt")
+            critic_ckpt = torch.load(save_path + f"critic_ckpt_{args.critic_ckpt}.pt", map_location=args.device)
             critic.load_state_dict(critic_ckpt["critic"])
             critic.eval()
             # load policy
@@ -351,7 +349,7 @@ def pipeline(args):
         for i in range(args.num_episodes):
             obs, ep_reward, cum_done, t = env_eval.reset(), 0., 0., 0
             while not np.all(cum_done) and t < args.task.max_path_length + 1:
-                
+
                 # 1) generate plan
                 if args.guidance_type == "MCSS":
                     planner_prior = torch.zeros((args.num_envs * args.planner_num_candidates, args.task.planner_horizon, planner_dim), device=args.device)
@@ -361,11 +359,12 @@ def pipeline(args):
 
                     # sample trajectories
                     planner_prior[:, 0, :obs_dim] = obs_repeat
-                    traj, log = planner.sample(
-                        planner_prior, solver=args.planner_solver,
-                        n_samples=args.num_envs * args.planner_num_candidates, sample_steps=args.planner_sampling_steps, use_ema=args.planner_use_ema,
-                        condition_cfg=None, w_cfg=1.0, temperature=args.task.planner_temperature)
-                    
+                    with torch.no_grad():
+                        traj, log = planner.sample(
+                            planner_prior, solver=args.planner_solver,
+                            n_samples=args.num_envs * args.planner_num_candidates, sample_steps=args.planner_sampling_steps, use_ema=args.planner_use_ema,
+                            condition_cfg=None, w_cfg=1.0, temperature=args.task.planner_temperature)
+
                     # resample
                     with torch.no_grad():
                         value = critic(traj)
@@ -382,10 +381,11 @@ def pipeline(args):
 
                     # sample trajectories
                     planner_prior[:, 0, :obs_dim] = obs
-                    traj, log = planner.sample(
-                        planner_prior, solver=args.planner_solver,
-                        n_samples=args.num_envs, sample_steps=args.planner_sampling_steps, use_ema=args.planner_use_ema,
-                        condition_cfg=condition, w_cfg=args.task.planner_w_cfg, temperature=args.task.planner_temperature)
+                    with torch.no_grad():
+                        traj, log = planner.sample(
+                            planner_prior, solver=args.planner_solver,
+                            n_samples=args.num_envs, sample_steps=args.planner_sampling_steps, use_ema=args.planner_use_ema,
+                            condition_cfg=condition, w_cfg=args.task.planner_w_cfg, temperature=args.task.planner_temperature)
                 
                 elif args.guidance_type == "cg":
                     planner_prior = torch.zeros((args.num_envs * args.planner_num_candidates, args.task.planner_horizon, planner_dim), device=args.device)
@@ -394,10 +394,11 @@ def pipeline(args):
                     obs_repeat = obs.unsqueeze(1).repeat(1, args.planner_num_candidates, 1).view(-1, obs_dim)
                     
                     planner_prior[:, 0, :obs_dim] = obs_repeat
-                    traj, log = planner.sample(
-                        planner_prior, solver=args.planner_solver,
-                        n_samples=args.num_envs * args.planner_num_candidates, sample_steps=args.planner_sampling_steps, use_ema=args.planner_use_ema,
-                        w_cg=args.task.planner_w_cfg, temperature=args.task.planner_temperature)
+                    with torch.no_grad():
+                        traj, log = planner.sample(
+                            planner_prior, solver=args.planner_solver,
+                            n_samples=args.num_envs * args.planner_num_candidates, sample_steps=args.planner_sampling_steps, use_ema=args.planner_use_ema,
+                            w_cg=args.task.planner_w_cfg, temperature=args.task.planner_temperature)
                     
                     # resample
                     with torch.no_grad():
@@ -457,7 +458,73 @@ def pipeline(args):
             wandb.log({'Mean Reward': mean, 'Error': err})
             wandb.finish()
 
-        
+    # ---------------------- Render ----------------------
+    elif args.mode == "render":
+
+        if args.guidance_type == "MCSS":
+            # load planner
+            planner.load(save_path + f"planner_ckpt_{args.planner_ckpt}.pt")
+            planner.eval()
+            # load critic
+            critic_ckpt = torch.load(save_path + f"critic_ckpt_{args.critic_ckpt}.pt", map_location=args.device)
+            critic.load_state_dict(critic_ckpt["critic"])
+            critic.eval()
+            # load policy
+            if args.pipeline_type == "separate":
+                if args.use_diffusion_invdyn:
+                    policy.load(save_path + f"policy_ckpt_{args.policy_ckpt}.pt")
+                    policy.eval()
+                else:
+                    invdyn.load(save_path + f"invdyn_ckpt_{args.invdyn_ckpt}.pt")
+                    invdyn.eval()
+
+        env_render = gym.make(args.task.env_name)
+        normalizer = planner_dataset.get_normalizer()
+
+        def policy_fn(obs):
+            obs_tensor = torch.tensor(normalizer.normalize(obs[None]), device=args.device, dtype=torch.float32)
+            planner_prior = torch.zeros((args.planner_num_candidates, args.task.planner_horizon, planner_dim), device=args.device)
+            planner_prior[:, 0, :obs_dim] = obs_tensor.repeat(args.planner_num_candidates, 1)
+
+            with torch.no_grad():
+                traj, _ = planner.sample(
+                    planner_prior, solver=args.planner_solver,
+                    n_samples=args.planner_num_candidates, sample_steps=args.planner_sampling_steps, use_ema=args.planner_use_ema,
+                    condition_cfg=None, w_cfg=1.0, temperature=args.task.planner_temperature)
+
+            with torch.no_grad():
+                value = critic(traj).view(1, args.planner_num_candidates)
+                idx = torch.argmax(value, -1)
+                traj = traj.reshape(1, args.planner_num_candidates, args.task.planner_horizon, planner_dim)
+                traj = traj[torch.arange(1), idx]  # (1, H, D)
+
+            if args.pipeline_type == "separate":
+                if args.use_diffusion_invdyn:
+                    policy_prior = torch.zeros((1, act_dim), device=args.device)
+                    with torch.no_grad():
+                        next_obs_plan = traj[:, 1, :]
+                        obs_policy = obs_tensor.clone()
+                        next_obs_policy = next_obs_plan.clone()
+                        if args.rebase_policy:
+                            next_obs_policy[:, :2] -= obs_policy[:, :2]
+                            obs_policy[:, :2] = 0
+                        act, _ = policy.sample(
+                            policy_prior, solver=args.policy_solver, n_samples=1,
+                            sample_steps=args.policy_sampling_steps,
+                            condition_cfg=torch.cat([obs_policy, next_obs_policy], dim=-1), w_cfg=1.0,
+                            use_ema=args.policy_use_ema, temperature=args.policy_temperature)
+                        return act.cpu().numpy()[0]
+                else:
+                    with torch.no_grad():
+                        return invdyn.predict(obs_tensor, traj[:, 1, :]).cpu().numpy()[0]
+            else:
+                return traj[0, 0, obs_dim:].cpu().numpy()
+
+        render_episode(
+            env_render, policy_fn,
+            gif_path=video_path + f"{args.task.env_name}.gif",
+            max_steps=args.task.max_path_length)
+
     else:
         raise ValueError(f"Invalid mode: {args.mode}")
 

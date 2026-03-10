@@ -2,6 +2,7 @@ dev_pipelines/
 scripts/
 outputs/
 /results
+/video_outputs
 /wandb
 # *.ipynb
 *.gif
@@ -183,3 +184,6 @@ lightning_logs/
 run.sh
 ignores/D4RL/
 D4RL/
+
+# claude
+.claude

@@ -3,6 +3,7 @@ import time
 import uuid
 import os
 import json
+from pathlib import Path
 from typing import Callable
 import imageio
 import wandb
@@ -27,11 +28,9 @@ def parse_cfg(cfg_path: str) -> OmegaConf:
 
 def make_dir(dir_path):
     """Create directory if it does not already exist."""
-    try:
-        os.makedirs(dir_path)
-    except OSError:
-        pass
-    return dir_path
+    p = Path(dir_path)
+    p.mkdir(parents=True, exist_ok=True)
+    return p
 
 
 def render_episode(
@@ -82,6 +81,8 @@ class Timer:
         self.tik = time.time()
 
     def stop(self):
+        if self.tik is None:
+            raise RuntimeError("Timer.stop() called before Timer.start()")
         return time.time() - self.tik
 
 

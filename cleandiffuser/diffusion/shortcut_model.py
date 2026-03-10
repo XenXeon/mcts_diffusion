@@ -8,7 +8,7 @@ import torch.nn as nn
 from cleandiffuser.classifier import BaseClassifier
 from cleandiffuser.nn_condition import BaseNNCondition
 from cleandiffuser.nn_diffusion import BaseNNDiffusion
-from cleandiffuser.utils import at_least_ndim
+from cleandiffuser.utils import at_least_ndim, SinusoidalEmbedding
 from .basic import DiffusionModel
 
 
@@ -95,23 +95,28 @@ class ShortcutModel(DiffusionModel):
         self.flow_matching_weight = flow_matching_weight
         self.x_max, self.x_min = x_max, x_min
 
-        # Small MLP to embed dt into the same space as the time/condition embedding.
-        # Output is added to condition before being passed to nn_diffusion,
-        # so DiT1d requires no changes.
-        self.map_dt = nn.Sequential(
+        # Sinusoidal encoder for dt (no learnable params, fixed).
+        self.sin_emb_dt = SinusoidalEmbedding(emb_dim).to(device)
+
+        # MLP to project sinusoidal dt embedding into condition space.
+        # Registered inside self.model so it is automatically covered by
+        # the optimizer, ema_update(), save(), and load().
+        self.model["map_dt"] = nn.Sequential(
             nn.Linear(emb_dim, emb_dim), nn.Mish(),
             nn.Linear(emb_dim, emb_dim)
         ).to(device)
+        self.model_ema["map_dt"] = deepcopy(self.model["map_dt"]).requires_grad_(False)
 
-        # TODO: decide on sinusoidal vs learned embedding for dt.
-        # A sinusoidal embedding of dt (scalar in [0,1]) before map_dt is likely best.
-        # See cleandiffuser/utils for SinusoidalEmbedding reference.
+        # Re-create optimizer so it includes map_dt parameters.
+        if optim_params is None:
+            optim_params = {"lr": 2e-4, "weight_decay": 1e-5}
+        self.optimizer = torch.optim.AdamW(self.model.parameters(), **optim_params)
 
-        # Progressive teacher model: a frozen snapshot of the model updated at
+        # Progressive teacher model: a frozen snapshot of model_ema updated at
         # milestone steps. Bootstrap targets are computed using the teacher for
         # training stability. Call update_teacher() at the right milestones
         # from the pipeline training loop.
-        self.teacher_model = deepcopy(self.model).requires_grad_(False)
+        self.teacher_model = deepcopy(self.model_ema).requires_grad_(False)
         self.teacher_model.eval()
 
     def update_teacher(self):
@@ -247,8 +252,7 @@ class ShortcutModel(DiffusionModel):
 
         loss.backward()
         grad_norm = nn.utils.clip_grad_norm_(
-            list(self.model.parameters()) + list(self.map_dt.parameters()),
-            self.grad_clip_norm
+            self.model.parameters(), self.grad_clip_norm
         ) if self.grad_clip_norm else None
         self.optimizer.step()
         self.optimizer.zero_grad()

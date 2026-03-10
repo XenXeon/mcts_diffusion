@@ -131,8 +131,8 @@ class Logger:
     def save_agent(self, agent=None, identifier='final'):
         if agent:
             fp = self._model_dir / f'model_{str(identifier)}.pt'
-        agent.save(fp)
-        print(f"model_{str(identifier)} saved")
+            agent.save(fp)
+            print(f"model_{str(identifier)} saved")
 
     def finish(self, agent):
         try:

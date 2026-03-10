@@ -304,7 +304,7 @@ def pipeline(args):
             planner.load(save_path + f"planner_ckpt_{args.planner_ckpt}.pt")
             planner.eval()
             # load critic
-            critic_ckpt = torch.load(save_path + f"critic_ckpt_{args.critic_ckpt}.pt")
+            critic_ckpt = torch.load(save_path + f"critic_ckpt_{args.critic_ckpt}.pt", map_location=args.device)
             critic.load_state_dict(critic_ckpt["critic"])
             critic.eval()
             # load policy
@@ -362,11 +362,12 @@ def pipeline(args):
 
                     # sample trajectories
                     planner_prior[:, 0, :obs_dim] = obs_repeat
-                    traj, log = planner.sample(
-                        planner_prior, solver=args.planner_solver,
-                        n_samples=args.num_envs * args.planner_num_candidates, sample_steps=args.planner_sampling_steps, use_ema=args.planner_use_ema,
-                        condition_cfg=None, w_cfg=1.0, temperature=args.task.planner_temperature)
-                    
+                    with torch.no_grad():
+                        traj, log = planner.sample(
+                            planner_prior, solver=args.planner_solver,
+                            n_samples=args.num_envs * args.planner_num_candidates, sample_steps=args.planner_sampling_steps, use_ema=args.planner_use_ema,
+                            condition_cfg=None, w_cfg=1.0, temperature=args.task.planner_temperature)
+
                     # resample
                     with torch.no_grad():
                         value = critic(traj)
@@ -383,10 +384,11 @@ def pipeline(args):
 
                     # sample trajectories
                     planner_prior[:, 0, :obs_dim] = obs
-                    traj, log = planner.sample(
-                        planner_prior, solver=args.planner_solver,
-                        n_samples=args.num_envs, sample_steps=args.planner_sampling_steps, use_ema=args.planner_use_ema,
-                        condition_cfg=condition, w_cfg=args.task.planner_w_cfg, temperature=args.task.planner_temperature)
+                    with torch.no_grad():
+                        traj, log = planner.sample(
+                            planner_prior, solver=args.planner_solver,
+                            n_samples=args.num_envs, sample_steps=args.planner_sampling_steps, use_ema=args.planner_use_ema,
+                            condition_cfg=condition, w_cfg=args.task.planner_w_cfg, temperature=args.task.planner_temperature)
                 
                 elif args.guidance_type == "cg":
                     planner_prior = torch.zeros((args.num_envs * args.planner_num_candidates, args.task.planner_horizon, planner_dim), device=args.device)
@@ -395,10 +397,11 @@ def pipeline(args):
                     obs_repeat = obs.unsqueeze(1).repeat(1, args.planner_num_candidates, 1).view(-1, obs_dim)
                     
                     planner_prior[:, 0, :obs_dim] = obs_repeat
-                    traj, log = planner.sample(
-                        planner_prior, solver=args.planner_solver,
-                        n_samples=args.num_envs * args.planner_num_candidates, sample_steps=args.planner_sampling_steps, use_ema=args.planner_use_ema,
-                        w_cg=args.task.planner_w_cfg, temperature=args.task.planner_temperature)
+                    with torch.no_grad():
+                        traj, log = planner.sample(
+                            planner_prior, solver=args.planner_solver,
+                            n_samples=args.num_envs * args.planner_num_candidates, sample_steps=args.planner_sampling_steps, use_ema=args.planner_use_ema,
+                            w_cg=args.task.planner_w_cfg, temperature=args.task.planner_temperature)
                     
                     # resample
                     with torch.no_grad():

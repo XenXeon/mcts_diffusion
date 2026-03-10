@@ -184,3 +184,6 @@ lightning_logs/
 run.sh
 ignores/D4RL/
 D4RL/
+
+# claude
+.claude

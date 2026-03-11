@@ -26,7 +26,7 @@ ENV LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/root/.mujoco/mujoco210/bin
 RUN curl -sS https://bootstrap.pypa.io/get-pip.py | python3.10
 RUN ln -sf /usr/bin/python3.10 /usr/bin/python
 
-# 5. Install PyTorch 2.7 stable with CUDA 12.8 for RTX 50-Series (sm_120) support
+# 5. Install PyTorch and torchvision with CUDA 12.8 for RTX 50-Series (sm_120) support
 RUN pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
 
 WORKDIR /workspace

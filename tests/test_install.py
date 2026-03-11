@@ -9,11 +9,14 @@ def test_torch_cuda():
     print(f"CUDA device: {torch.cuda.get_device_name(0)}")
 
 
-def test_torch_is_nightly():
+def test_torch_blackwell_support():
     import torch
-    # Nightly builds have 'dev' in the version string
-    assert "dev" in torch.__version__, (
-        f"Expected nightly torch build (with 'dev' in version), got: {torch.__version__}"
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is not available")
+    # RTX 50-series (Blackwell) requires sm_120 support
+    arch_list = torch.cuda.get_arch_list()
+    assert "sm_120" in arch_list, (
+        f"sm_120 (Blackwell) not supported in this PyTorch build. Arch list: {arch_list}"
     )
 
 

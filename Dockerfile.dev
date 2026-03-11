@@ -5,7 +5,7 @@ FROM cleandiffuser:base
 COPY requirements.txt /tmp/requirements.txt
 RUN grep -vE "^(torch|torchvision|cython)" /tmp/requirements.txt \
     | pip install --no-cache-dir -r /dev/stdin \
-    && pip install --no-cache-dir pytest
+    && pip install --no-cache-dir pytest huggingface_hub
 
 # Install D4RL from source (not on PyPI)
 # Pin Cython to 0.29.x — D4RL's Cython extensions don't build with 3.x

@@ -1,5 +1,5 @@
 # Start from the official NVIDIA CUDA image with Ubuntu 22.04
-FROM nvidia/cuda:12.1.1-cudnn8-devel-ubuntu22.04
+FROM nvidia/cuda:12.8.0-cudnn-devel-ubuntu22.04
 
 # Prevent timezone prompts during installations
 ENV DEBIAN_FRONTEND=noninteractive
@@ -26,8 +26,8 @@ ENV LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/root/.mujoco/mujoco210/bin
 RUN curl -sS https://bootstrap.pypa.io/get-pip.py | python3.10
 RUN ln -sf /usr/bin/python3.10 /usr/bin/python
 
-# 5. Pre-install PyTorch Nightly for RTX 50-Series (sm_120)
-RUN pip install --pre torch torchvision --index-url https://download.pytorch.org/whl/nightly/cu128
+# 5. Install PyTorch 2.7 stable with CUDA 12.8 for RTX 50-Series (sm_120) support
+RUN pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
 
 WORKDIR /workspace
 CMD ["/bin/bash"]

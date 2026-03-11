@@ -11,9 +11,12 @@ def test_torch_cuda():
 
 def test_torch_blackwell_support():
     import torch
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is not available")
     # RTX 50-series (Blackwell) requires sm_120 support
-    assert "sm_120" in torch.cuda.get_arch_list(), (
-        f"sm_120 (Blackwell) not supported in this PyTorch build. Arch list: {torch.cuda.get_arch_list()}"
+    arch_list = torch.cuda.get_arch_list()
+    assert "sm_120" in arch_list, (
+        f"sm_120 (Blackwell) not supported in this PyTorch build. Arch list: {arch_list}"
     )
 
 

@@ -46,8 +46,6 @@ eval:
 		-w $(WORKDIR) \
 		-e WANDB_API_KEY=$(WANDB_API_KEY) \
 		-e WANDB_ENTITY=$(WANDB_ENTITY) \
-		-e CUDA_LAUNCH_BLOCKING=1 \
-		-e TORCH_USE_CUDA_DSA=1 \
 		$(IMAGE_DEV) \
 		python pipelines/$(PIPELINE).py \
 		mode=inference task=$(TASK) project=$(PROJECT) group=$(GROUP) name=$(NAME) \

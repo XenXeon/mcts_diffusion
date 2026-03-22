@@ -1,281 +1,274 @@
-"""Quick benchmark for the veteran pipeline with MCSS guidance.
+"""Quick benchmark for the veteran MCSS pipeline.
 
-Runs a small number of episodes with reduced compute to get a fast,
-reasonably meaningful performance signal. Use this to check whether
-a code change broke things or shifted performance before committing
-to a full evaluation run.
+Runs a small number of episodes to get a fast performance signal.
+Use this to verify a code change didn't break things or noticeably
+shift performance before doing a full evaluation.
+
+The script auto-detects the environment domain (maze2d / antmaze)
+from the task name and uses the correct dataset, reward logic, and
+network config for each.
 
 Usage:
-    # Defaults: 5 envs, 3 episodes, antmaze-medium-play-v2
+    # Default: maze2d-umaze-v1, 5 envs, 3 episodes
     python pipelines/quick_benchmark.py
 
-    # Specific task
+    # Different task
     python pipelines/quick_benchmark.py --task antmaze-large-diverse-v2
 
-    # Compare two configs (A/B)
-    python pipelines/quick_benchmark.py --compare \\
-        --sampling-steps-a 20 --candidates-a 50 \\
-        --sampling-steps-b 5  --candidates-b 10
-
-    # Custom checkpoint paths
+    # Custom checkpoints
     python pipelines/quick_benchmark.py \\
-        --planner-ckpt /path/to/planner.pt \\
-        --critic-ckpt /path/to/critic.pt \\
-        --policy-ckpt /path/to/policy.pt
+        --planner-ckpt results/.../planner_ckpt_latest.pt \\
+        --critic-ckpt results/.../critic_ckpt_latest.pt \\
+        --policy-ckpt results/.../policy_ckpt_latest.pt
+
+    # Save results to JSON for later comparison
+    python pipelines/quick_benchmark.py --save-json baseline.json
+
+    # Compare against a saved baseline
+    python pipelines/quick_benchmark.py --baseline baseline.json
 """
 
 import argparse
 import json
 import os
-import sys
 import time
-from dataclasses import dataclass, field, asdict
 from typing import Optional
 
 import d4rl
 import gym
 import numpy as np
 import torch
-import torch.nn as nn
 
-from cleandiffuser.dataset.d4rl_antmaze_dataset import DV_D4RLAntmazeSeqDataset
 from cleandiffuser.diffusion import ContinuousDiffusionSDE, DiscreteDiffusionSDE
-from cleandiffuser.invdynamic import MlpInvDynamic
 from cleandiffuser.nn_condition import IdentityCondition
 from cleandiffuser.nn_diffusion import DiT1d, DVInvMlp
 from cleandiffuser.utils import DVHorizonCritic
 
+
 # ──────────────────────────────────────────────────────────────────
-# Task registry — mirrors the hydra task configs
+# Task registry — mirrors configs/veteran/{domain}/task/*.yaml
 # ──────────────────────────────────────────────────────────────────
+
 TASKS = {
-    "antmaze-medium-play-v2":    {"max_path_length": 1000, "planner_horizon": 40, "stride": 25, "planner_temperature": 1.0},
-    "antmaze-medium-diverse-v2": {"max_path_length": 1000, "planner_horizon": 40, "stride": 25, "planner_temperature": 1.0},
-    "antmaze-large-play-v2":     {"max_path_length": 1000, "planner_horizon": 40, "stride": 25, "planner_temperature": 1.0},
-    "antmaze-large-diverse-v2":  {"max_path_length": 1000, "planner_horizon": 40, "stride": 25, "planner_temperature": 1.0},
+    # maze2d
+    "maze2d-umaze-v1":           {"domain": "maze2d", "max_path_length": 300,  "planner_horizon": 32, "stride": 15, "planner_temperature": 1.0, "discount": 1.0,   "planner_depth": 2},
+    "maze2d-medium-v1":          {"domain": "maze2d", "max_path_length": 600,  "planner_horizon": 32, "stride": 15, "planner_temperature": 1.0, "discount": 1.0,   "planner_depth": 2},
+    "maze2d-large-v1":           {"domain": "maze2d", "max_path_length": 800,  "planner_horizon": 32, "stride": 15, "planner_temperature": 1.0, "discount": 1.0,   "planner_depth": 2},
+    # antmaze
+    "antmaze-medium-play-v2":    {"domain": "antmaze", "max_path_length": 1000, "planner_horizon": 40, "stride": 25, "planner_temperature": 1.0, "discount": 0.997, "planner_depth": 8},
+    "antmaze-medium-diverse-v2": {"domain": "antmaze", "max_path_length": 1000, "planner_horizon": 40, "stride": 25, "planner_temperature": 1.0, "discount": 0.997, "planner_depth": 8},
+    "antmaze-large-play-v2":     {"domain": "antmaze", "max_path_length": 1000, "planner_horizon": 40, "stride": 25, "planner_temperature": 1.0, "discount": 0.997, "planner_depth": 8},
+    "antmaze-large-diverse-v2":  {"domain": "antmaze", "max_path_length": 1000, "planner_horizon": 40, "stride": 25, "planner_temperature": 1.0, "discount": 0.997, "planner_depth": 8},
 }
 
-# Default checkpoint path pattern (relative to repo root)
-DEFAULT_CKPT_BASE = "results/veteran_d4rl_antmaze_H{horizon}_Jump{stride}_next1_MCSS_transformer_d8_width256_separate_dpTrue/{task}/"
 
-
-@dataclass
-class BenchConfig:
-    """All knobs for a single benchmark run."""
-    task: str = "antmaze-medium-play-v2"
-    seed: int = 42
-    device: str = "cuda:0"
-    # Eval scale — these are the "quick" defaults
-    num_envs: int = 5
-    num_episodes: int = 3
-    max_path_length: int = 0  # 0 = use task default
-    # Planner
-    planner_sampling_steps: int = 20
-    planner_num_candidates: int = 50
-    planner_solver: str = "ddim"
-    planner_use_ema: bool = True
-    planner_temperature: float = 0.0  # 0 = use task default
-    # Policy
-    policy_sampling_steps: int = 10
-    policy_solver: str = "ddpm"
-    policy_use_ema: bool = True
-    policy_temperature: float = 0.5
-    rebase_policy: bool = True
-    # Network dims (must match training)
-    planner_emb_dim: int = 128
-    planner_d_model: int = 256
-    planner_depth: int = 8
-    policy_hidden_dim: int = 256
-    policy_diffusion_steps: int = 10
-    policy_ema_rate: float = 0.995
-    planner_ema_rate: float = 0.9999
-    # Checkpoint paths (auto-resolved if None)
-    planner_ckpt: Optional[str] = None
-    critic_ckpt: Optional[str] = None
-    policy_ckpt: Optional[str] = None
-    # Label for display
-    label: str = ""
-
-
-def resolve_ckpt_paths(cfg: BenchConfig):
-    """Fill in default checkpoint paths if not explicitly provided."""
-    task_info = TASKS[cfg.task]
-    base = DEFAULT_CKPT_BASE.format(
-        horizon=task_info["planner_horizon"],
-        stride=task_info["stride"],
-        task=cfg.task,
+def get_ckpt_base(task: str) -> str:
+    """Build the default checkpoint directory for a task."""
+    info = TASKS[task]
+    domain = info["domain"]
+    depth = info["planner_depth"]
+    return (
+        f"results/veteran_d4rl_{domain}"
+        f"_H{info['planner_horizon']}_Jump{info['stride']}"
+        f"_next1_MCSS_transformer_d{depth}_width256_separate_dpTrue"
+        f"/{task}/"
     )
-    if cfg.planner_ckpt is None:
-        cfg.planner_ckpt = base + "planner_ckpt_latest.pt"
-    if cfg.critic_ckpt is None:
-        cfg.critic_ckpt = base + "critic_ckpt_latest.pt"
-    if cfg.policy_ckpt is None:
-        cfg.policy_ckpt = base + "policy_ckpt_latest.pt"
+
+
+def make_dataset(task: str, env):
+    """Create the correct dataset class for the domain."""
+    info = TASKS[task]
+    kwargs = dict(
+        horizon=info["planner_horizon"],
+        discount=info["discount"],
+        continous_reward_at_done=True,
+        reward_tune="iql",
+        stride=info["stride"],
+        learn_policy=False,
+        center_mapping=False,
+    )
+    if info["domain"] == "maze2d":
+        from cleandiffuser.dataset.d4rl_maze2d_dataset import DV_D4RLMaze2DSeqDataset
+        return DV_D4RLMaze2DSeqDataset(env.get_dataset(), **kwargs)
+    else:
+        from cleandiffuser.dataset.d4rl_antmaze_dataset import DV_D4RLAntmazeSeqDataset
+        return DV_D4RLAntmazeSeqDataset(env.get_dataset(), **kwargs)
 
 
 # ──────────────────────────────────────────────────────────────────
 # Model loading
 # ──────────────────────────────────────────────────────────────────
 
-def load_models(cfg: BenchConfig, obs_dim: int, act_dim: int):
-    """Instantiate and load planner, critic, and policy from checkpoints."""
-    task_info = TASKS[cfg.task]
-    planner_horizon = task_info["planner_horizon"]
-    planner_dim = obs_dim  # separate pipeline = obs only
+def load_models(task, device, obs_dim, act_dim,
+                planner_ckpt, critic_ckpt, policy_ckpt):
+    """Instantiate and load planner, critic, and policy."""
+    info = TASKS[task]
+    planner_horizon = info["planner_horizon"]
+    planner_dim = obs_dim  # separate pipeline
+
+    emb_dim = 128
+    d_model = 256
 
     # Planner
-    nn_diffusion_planner = DiT1d(
-        planner_dim, emb_dim=cfg.planner_emb_dim,
-        d_model=cfg.planner_d_model, n_heads=cfg.planner_d_model // 64,
-        depth=cfg.planner_depth, timestep_emb_type="fourier")
+    nn_planner = DiT1d(
+        planner_dim, emb_dim=emb_dim,
+        d_model=d_model, n_heads=d_model // 64,
+        depth=info["planner_depth"], timestep_emb_type="fourier")
 
     fix_mask = torch.zeros((planner_horizon, planner_dim))
     fix_mask[0, :obs_dim] = 1.
     loss_weight = torch.ones((planner_horizon, planner_dim))
-    loss_weight[1] = 1  # planner_next_obs_loss_weight=1
+    loss_weight[1] = 1
 
     planner = ContinuousDiffusionSDE(
-        nn_diffusion_planner, nn_condition=None,
+        nn_planner, nn_condition=None,
         fix_mask=fix_mask, loss_weight=loss_weight, classifier=None,
-        ema_rate=cfg.planner_ema_rate,
-        device=cfg.device, predict_noise=True, noise_schedule="linear")
-    planner.load(cfg.planner_ckpt)
+        ema_rate=0.9999, device=device, predict_noise=True,
+        noise_schedule="linear")
+    planner.load(planner_ckpt)
     planner.eval()
 
     # Critic
     critic = DVHorizonCritic(
-        planner_dim, emb_dim=cfg.planner_emb_dim,
-        d_model=cfg.planner_d_model, n_heads=cfg.planner_d_model // 64,
-        depth=2, norm_type="pre").to(cfg.device)
-    critic_ckpt = torch.load(cfg.critic_ckpt, map_location=cfg.device)
-    critic.load_state_dict(critic_ckpt["critic"])
+        planner_dim, emb_dim=emb_dim,
+        d_model=d_model, n_heads=d_model // 64,
+        depth=2, norm_type="pre").to(device)
+    ckpt = torch.load(critic_ckpt, map_location=device)
+    critic.load_state_dict(ckpt["critic"])
     critic.eval()
 
     # Policy (diffusion inverse dynamics)
-    nn_diffusion_invdyn = DVInvMlp(
+    nn_invdyn = DVInvMlp(
         obs_dim, act_dim, emb_dim=64,
-        hidden_dim=cfg.policy_hidden_dim, timestep_emb_type="positional").to(cfg.device)
-    nn_condition_invdyn = IdentityCondition(dropout=0.0).to(cfg.device)
+        hidden_dim=256, timestep_emb_type="positional").to(device)
+    nn_cond = IdentityCondition(dropout=0.0).to(device)
     policy = DiscreteDiffusionSDE(
-        nn_diffusion_invdyn, nn_condition_invdyn, predict_noise=True,
+        nn_invdyn, nn_cond, predict_noise=True,
         optim_params={"lr": 3e-4},
-        x_max=+1. * torch.ones((1, act_dim), device=cfg.device),
-        x_min=-1. * torch.ones((1, act_dim), device=cfg.device),
-        diffusion_steps=cfg.policy_diffusion_steps,
-        ema_rate=cfg.policy_ema_rate, device=cfg.device)
-    policy.load(cfg.policy_ckpt)
+        x_max=+1. * torch.ones((1, act_dim), device=device),
+        x_min=-1. * torch.ones((1, act_dim), device=device),
+        diffusion_steps=10, ema_rate=0.995, device=device)
+    policy.load(policy_ckpt)
     policy.eval()
 
-    return planner, critic, policy, planner_dim
+    return planner, critic, policy
 
 
 # ──────────────────────────────────────────────────────────────────
-# Evaluation loop
+# Evaluation
 # ──────────────────────────────────────────────────────────────────
 
-def run_eval(cfg: BenchConfig):
-    """Run evaluation and return per-environment normalized scores + timing."""
-    resolve_ckpt_paths(cfg)
-    task_info = TASKS[cfg.task]
-    max_path_length = cfg.max_path_length or task_info["max_path_length"]
-    planner_horizon = task_info["planner_horizon"]
-    planner_temperature = cfg.planner_temperature or task_info["planner_temperature"]
+def run_eval(task, device, num_envs, num_episodes, seed,
+             planner_ckpt, critic_ckpt, policy_ckpt):
+    """Run evaluation episodes and return (scores, timing_dict)."""
+    info = TASKS[task]
+    max_path_length = info["max_path_length"]
+    planner_horizon = info["planner_horizon"]
+    planner_temperature = info["planner_temperature"]
+    domain = info["domain"]
 
-    # Seed
-    torch.manual_seed(cfg.seed)
-    np.random.seed(cfg.seed)
+    torch.manual_seed(seed)
+    np.random.seed(seed)
 
-    # Dataset (needed for normalizer + dims)
-    env_tmp = gym.make(cfg.task)
-    dataset = DV_D4RLAntmazeSeqDataset(
-        env_tmp.get_dataset(), horizon=planner_horizon,
-        discount=0.997, continous_reward_at_done=True,
-        reward_tune="iql", stride=task_info["stride"],
-        learn_policy=False, center_mapping=False)
+    # Dataset for normalizer + dims
+    env_tmp = gym.make(task)
+    dataset = make_dataset(task, env_tmp)
     obs_dim, act_dim = dataset.o_dim, dataset.a_dim
     normalizer = dataset.get_normalizer()
     planner_dim = obs_dim
 
     # Models
-    planner, critic, policy, _ = load_models(cfg, obs_dim, act_dim)
+    planner, critic, policy = load_models(
+        task, device, obs_dim, act_dim,
+        planner_ckpt, critic_ckpt, policy_ckpt)
 
     # Vectorized env
-    env_eval = gym.vector.make(cfg.task, cfg.num_envs)
+    env_eval = gym.vector.make(task, num_envs)
 
     all_scores = []
     step_times = []
 
-    for ep in range(cfg.num_episodes):
-        obs, ep_reward, cum_done, t = env_eval.reset(), 0., 0., 0
+    for ep in range(num_episodes):
+        obs = env_eval.reset()
+        ep_reward = np.zeros(num_envs, dtype=np.float64)
+        finished = np.zeros(num_envs, dtype=bool)
+        cum_done = np.zeros(num_envs, dtype=bool)
+        t = 0
         ep_start = time.time()
 
         while not np.all(cum_done) and t < max_path_length + 1:
             step_t0 = time.time()
 
-            # --- Planner: sample + rerank with critic ---
+            # Planner: sample + rerank
             planner_prior = torch.zeros(
-                (cfg.num_envs * cfg.planner_num_candidates, planner_horizon, planner_dim),
-                device=cfg.device)
-
-            obs_t = torch.tensor(normalizer.normalize(obs), device=cfg.device, dtype=torch.float32)
-            obs_repeat = obs_t.unsqueeze(1).repeat(1, cfg.planner_num_candidates, 1).view(-1, obs_dim)
+                (num_envs * 50, planner_horizon, planner_dim),
+                device=device)
+            obs_t = torch.tensor(
+                normalizer.normalize(obs), device=device, dtype=torch.float32)
+            obs_repeat = obs_t.unsqueeze(1).repeat(1, 50, 1).view(-1, obs_dim)
             planner_prior[:, 0, :obs_dim] = obs_repeat
 
             with torch.no_grad():
                 traj, _ = planner.sample(
-                    planner_prior, solver=cfg.planner_solver,
-                    n_samples=cfg.num_envs * cfg.planner_num_candidates,
-                    sample_steps=cfg.planner_sampling_steps,
-                    use_ema=cfg.planner_use_ema,
+                    planner_prior, solver="ddim",
+                    n_samples=num_envs * 50,
+                    sample_steps=20, use_ema=True,
                     condition_cfg=None, w_cfg=1.0,
                     temperature=planner_temperature)
 
-            with torch.no_grad():
-                value = critic(traj).view(cfg.num_envs, cfg.planner_num_candidates)
+                value = critic(traj).view(num_envs, 50)
                 idx = torch.argmax(value, -1)
-                traj = traj.reshape(cfg.num_envs, cfg.planner_num_candidates, planner_horizon, planner_dim)
-                traj = traj[torch.arange(cfg.num_envs), idx]
+                traj = traj.reshape(num_envs, 50, planner_horizon, planner_dim)
+                traj = traj[torch.arange(num_envs), idx]
 
-            # --- Policy: inverse dynamics ---
-            policy_prior = torch.zeros((cfg.num_envs, act_dim), device=cfg.device)
+            # Policy: inverse dynamics
+            policy_prior = torch.zeros((num_envs, act_dim), device=device)
             with torch.no_grad():
                 next_obs_plan = traj[:, 1, :]
                 obs_policy = obs_t.clone()
                 next_obs_policy = next_obs_plan.clone()
-                if cfg.rebase_policy:
-                    next_obs_policy[:, :2] -= obs_policy[:, :2]
-                    obs_policy[:, :2] = 0
+                next_obs_policy[:, :2] -= obs_policy[:, :2]
+                obs_policy[:, :2] = 0
                 act, _ = policy.sample(
-                    policy_prior, solver=cfg.policy_solver,
-                    n_samples=cfg.num_envs,
-                    sample_steps=cfg.policy_sampling_steps,
+                    policy_prior, solver="ddpm",
+                    n_samples=num_envs, sample_steps=10,
                     condition_cfg=torch.cat([obs_policy, next_obs_policy], dim=-1),
-                    w_cfg=1.0, use_ema=cfg.policy_use_ema,
-                    temperature=cfg.policy_temperature)
+                    w_cfg=1.0, use_ema=True, temperature=0.5)
                 act = act.cpu().numpy()
 
-            obs, rew, done, info = env_eval.step(act)
+            obs, rew, done, info_env = env_eval.step(act)
             t += 1
-            cum_done = done if cum_done is None else np.logical_or(cum_done, done)
-            ep_reward += rew
+            cum_done = np.logical_or(cum_done, done)
             step_times.append(time.time() - step_t0)
 
+            # Reward accumulation differs by domain
+            if domain == "maze2d":
+                finished |= (rew == 1.0)
+                ep_reward += finished
+            else:
+                ep_reward += rew
+
         ep_elapsed = time.time() - ep_start
-        scores = np.clip(ep_reward, 0., 1.)
-        scores = np.array([env_tmp.get_normalized_score(s) for s in scores]) * 100
+
+        # Normalize scores
+        if domain == "maze2d":
+            scores = np.array([env_tmp.get_normalized_score(r) for r in ep_reward]) * 100
+        else:
+            scores = np.array([env_tmp.get_normalized_score(r) for r in np.clip(ep_reward, 0., 1.)]) * 100
+
         all_scores.append(scores)
-        print(f"  Episode {ep+1}/{cfg.num_episodes}: "
-              f"mean={scores.mean():.1f}  std={scores.std():.1f}  "
-              f"time={ep_elapsed:.1f}s")
+        print(f"  Episode {ep+1}/{num_episodes}: "
+              f"mean={scores.mean():.1f}  min={scores.min():.1f}  "
+              f"max={scores.max():.1f}  time={ep_elapsed:.1f}s")
 
     env_eval.close()
     env_tmp.close()
 
     all_scores = np.concatenate(all_scores)
     timing = {
-        "mean_step_ms": np.mean(step_times) * 1000,
-        "median_step_ms": np.median(step_times) * 1000,
-        "p95_step_ms": np.percentile(step_times, 95) * 1000,
+        "mean_step_ms": float(np.mean(step_times) * 1000),
+        "median_step_ms": float(np.median(step_times) * 1000),
+        "p95_step_ms": float(np.percentile(step_times, 95) * 1000),
     }
     return all_scores, timing
 
@@ -284,51 +277,57 @@ def run_eval(cfg: BenchConfig):
 # Reporting
 # ──────────────────────────────────────────────────────────────────
 
-def report(label: str, scores: np.ndarray, timing: dict):
+def report(task, scores, timing):
     n = len(scores)
-    mean = scores.mean()
-    std = scores.std()
+    mean = float(scores.mean())
+    std = float(scores.std())
     sem = std / np.sqrt(n)
     ci95 = 1.96 * sem
+
     print(f"\n{'=' * 60}")
-    print(f"  {label}")
+    print(f"  {task}  ({n} envs total)")
     print(f"{'=' * 60}")
-    print(f"  Episodes evaluated : {n}")
-    print(f"  Normalized score   : {mean:.2f} +/- {ci95:.2f}  (95% CI)")
-    print(f"  Std                : {std:.2f}")
-    print(f"  Min / Max          : {scores.min():.2f} / {scores.max():.2f}")
-    print(f"  Step latency (ms)  : mean={timing['mean_step_ms']:.1f}  "
-          f"median={timing['median_step_ms']:.1f}  p95={timing['p95_step_ms']:.1f}")
+    print(f"  Normalized score : {mean:.2f} +/- {ci95:.2f}  (95% CI)")
+    print(f"  Std              : {std:.2f}")
+    print(f"  Min / Max        : {scores.min():.2f} / {scores.max():.2f}")
+    print(f"  Step latency     : mean={timing['mean_step_ms']:.1f}ms  "
+          f"p50={timing['median_step_ms']:.1f}ms  "
+          f"p95={timing['p95_step_ms']:.1f}ms")
     print(f"{'=' * 60}\n")
-    return {"label": label, "n": n, "mean": mean, "std": std, "ci95": ci95,
-            "min": float(scores.min()), "max": float(scores.max()), **timing}
+
+    return {
+        "task": task, "n": n, "mean": mean, "std": std, "ci95": ci95,
+        "min": float(scores.min()), "max": float(scores.max()),
+        **timing,
+    }
 
 
-def compare_report(result_a: dict, result_b: dict):
-    """Print a comparison and a simple two-sample t-test."""
-    delta = result_b["mean"] - result_a["mean"]
-    pooled_se = np.sqrt(result_a["std"]**2 / result_a["n"] + result_b["std"]**2 / result_b["n"])
-    if pooled_se > 0:
-        t_stat = delta / pooled_se
-    else:
-        t_stat = 0.0
+def compare_with_baseline(current, baseline):
+    """Compare current results against a saved baseline JSON."""
+    delta = current["mean"] - baseline["mean"]
+    pooled_se = np.sqrt(
+        baseline["std"]**2 / baseline["n"] +
+        current["std"]**2 / current["n"])
+    t_stat = delta / pooled_se if pooled_se > 0 else 0.0
 
     print(f"{'=' * 60}")
-    print(f"  A/B Comparison")
+    print(f"  Comparison vs baseline")
     print(f"{'=' * 60}")
-    print(f"  A ({result_a['label']}): {result_a['mean']:.2f} +/- {result_a['ci95']:.2f}")
-    print(f"  B ({result_b['label']}): {result_b['mean']:.2f} +/- {result_b['ci95']:.2f}")
-    print(f"  Delta (B - A)     : {delta:+.2f}")
-    print(f"  t-statistic       : {t_stat:.3f}")
+    print(f"  Baseline : {baseline['mean']:.2f} +/- {baseline['ci95']:.2f}  (n={baseline['n']})")
+    print(f"  Current  : {current['mean']:.2f} +/- {current['ci95']:.2f}  (n={current['n']})")
+    print(f"  Delta    : {delta:+.2f}")
+    print(f"  t-stat   : {t_stat:.3f}")
     if abs(t_stat) > 1.96:
-        print(f"  ** Significant at p < 0.05 **")
+        print(f"  ** Significant change (p < 0.05) **")
     elif abs(t_stat) > 1.645:
-        print(f"  * Marginally significant (p < 0.10) *")
+        print(f"  * Marginal change (p < 0.10) *")
     else:
-        print(f"  Not significant (|t| = {abs(t_stat):.2f} < 1.96)")
-    speed_ratio = result_b["mean_step_ms"] / max(result_a["mean_step_ms"], 1e-6)
-    print(f"  Step latency ratio: {speed_ratio:.2f}x  "
-          f"(A={result_a['mean_step_ms']:.1f}ms, B={result_b['mean_step_ms']:.1f}ms)")
+        print(f"  No significant change")
+    if baseline.get("mean_step_ms"):
+        ratio = current["mean_step_ms"] / max(baseline["mean_step_ms"], 1e-6)
+        print(f"  Latency  : {ratio:.2f}x  "
+              f"(baseline={baseline['mean_step_ms']:.1f}ms, "
+              f"current={current['mean_step_ms']:.1f}ms)")
     print(f"{'=' * 60}\n")
 
 
@@ -336,126 +335,86 @@ def compare_report(result_a: dict, result_b: dict):
 # CLI
 # ──────────────────────────────────────────────────────────────────
 
-def build_parser():
+def main():
     p = argparse.ArgumentParser(
-        description="Quick benchmark for veteran pipeline (MCSS)")
-    p.add_argument("--task", default="antmaze-medium-play-v2", choices=list(TASKS.keys()))
+        description="Quick benchmark for veteran MCSS pipeline")
+    p.add_argument("--task", default="maze2d-umaze-v1",
+                   help="Any d4rl task. Defaults to maze2d-umaze-v1. "
+                        f"Known tasks: {', '.join(TASKS.keys())}")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--device", default="cuda:0")
-    p.add_argument("--num-envs", type=int, default=5)
-    p.add_argument("--num-episodes", type=int, default=3)
-    p.add_argument("--max-path-length", type=int, default=0,
-                    help="0 = use task default")
-
-    # Planner
-    p.add_argument("--sampling-steps", type=int, default=20)
-    p.add_argument("--candidates", type=int, default=50)
-    p.add_argument("--planner-solver", default="ddim")
-
-    # Policy
-    p.add_argument("--policy-sampling-steps", type=int, default=10)
-    p.add_argument("--policy-solver", default="ddpm")
-    p.add_argument("--policy-temperature", type=float, default=0.5)
+    p.add_argument("--num-envs", type=int, default=5,
+                   help="Parallel environments (default: 5)")
+    p.add_argument("--num-episodes", type=int, default=3,
+                   help="Number of eval episodes (default: 3)")
 
     # Checkpoints
-    p.add_argument("--planner-ckpt", default=None)
-    p.add_argument("--critic-ckpt", default=None)
-    p.add_argument("--policy-ckpt", default=None)
+    p.add_argument("--planner-ckpt", default=None,
+                   help="Path to planner checkpoint (auto-resolved if omitted)")
+    p.add_argument("--critic-ckpt", default=None,
+                   help="Path to critic checkpoint (auto-resolved if omitted)")
+    p.add_argument("--policy-ckpt", default=None,
+                   help="Path to policy checkpoint (auto-resolved if omitted)")
 
-    # A/B comparison mode
-    p.add_argument("--compare", action="store_true",
-                    help="Run an A/B comparison with different inference params")
-    p.add_argument("--sampling-steps-a", type=int, default=None)
-    p.add_argument("--candidates-a", type=int, default=None)
-    p.add_argument("--policy-steps-a", type=int, default=None)
-    p.add_argument("--sampling-steps-b", type=int, default=None)
-    p.add_argument("--candidates-b", type=int, default=None)
-    p.add_argument("--policy-steps-b", type=int, default=None)
-
-    # Output
+    # Output / comparison
     p.add_argument("--save-json", default=None,
-                    help="Save results to a JSON file")
-    return p
+                   help="Save results to JSON for later comparison")
+    p.add_argument("--baseline", default=None,
+                   help="Path to a baseline JSON to compare against")
 
+    args = p.parse_args()
 
-def cfg_from_args(args) -> BenchConfig:
-    return BenchConfig(
-        task=args.task, seed=args.seed, device=args.device,
-        num_envs=args.num_envs, num_episodes=args.num_episodes,
-        max_path_length=args.max_path_length,
-        planner_sampling_steps=args.sampling_steps,
-        planner_num_candidates=args.candidates,
-        planner_solver=args.planner_solver,
-        policy_sampling_steps=args.policy_sampling_steps,
-        policy_solver=args.policy_solver,
-        policy_temperature=args.policy_temperature,
-        planner_ckpt=args.planner_ckpt,
-        critic_ckpt=args.critic_ckpt,
-        policy_ckpt=args.policy_ckpt,
-    )
+    task = args.task
+    if task not in TASKS:
+        print(f"Warning: '{task}' not in known tasks. "
+              f"Will try anyway but checkpoint auto-resolution won't work.")
 
-
-def main():
-    args = build_parser().parse_args()
-
-    if args.compare:
-        # ── A/B mode ──
-        cfg_a = cfg_from_args(args)
-        cfg_a.label = "A (baseline)"
-        if args.sampling_steps_a is not None:
-            cfg_a.planner_sampling_steps = args.sampling_steps_a
-        if args.candidates_a is not None:
-            cfg_a.planner_num_candidates = args.candidates_a
-        if args.policy_steps_a is not None:
-            cfg_a.policy_sampling_steps = args.policy_steps_a
-
-        cfg_b = cfg_from_args(args)
-        cfg_b.label = "B (variant)"
-        if args.sampling_steps_b is not None:
-            cfg_b.planner_sampling_steps = args.sampling_steps_b
-        if args.candidates_b is not None:
-            cfg_b.planner_num_candidates = args.candidates_b
-        if args.policy_steps_b is not None:
-            cfg_b.policy_sampling_steps = args.policy_steps_b
-
-        print(f"\n>>> Running config A: steps={cfg_a.planner_sampling_steps}, "
-              f"candidates={cfg_a.planner_num_candidates}, "
-              f"policy_steps={cfg_a.policy_sampling_steps}")
-        scores_a, timing_a = run_eval(cfg_a)
-        res_a = report(cfg_a.label, scores_a, timing_a)
-
-        print(f"\n>>> Running config B: steps={cfg_b.planner_sampling_steps}, "
-              f"candidates={cfg_b.planner_num_candidates}, "
-              f"policy_steps={cfg_b.policy_sampling_steps}")
-        scores_b, timing_b = run_eval(cfg_b)
-        res_b = report(cfg_b.label, scores_b, timing_b)
-
-        compare_report(res_a, res_b)
-
-        if args.save_json:
-            with open(args.save_json, "w") as f:
-                json.dump({"config_a": res_a, "config_b": res_b}, f, indent=2)
-            print(f"Results saved to {args.save_json}")
-
+    # Resolve checkpoints
+    if task in TASKS:
+        base = get_ckpt_base(task)
     else:
-        # ── Single run mode ──
-        cfg = cfg_from_args(args)
-        cfg.label = f"{cfg.task} (steps={cfg.planner_sampling_steps}, cand={cfg.planner_num_candidates})"
+        base = ""
 
-        print(f"\n>>> Quick benchmark: {cfg.task}")
-        print(f"    envs={cfg.num_envs}, episodes={cfg.num_episodes}, "
-              f"planner_steps={cfg.planner_sampling_steps}, "
-              f"candidates={cfg.planner_num_candidates}, "
-              f"policy_steps={cfg.policy_sampling_steps}")
-        print()
+    planner_ckpt = args.planner_ckpt or (base + "planner_ckpt_latest.pt")
+    critic_ckpt = args.critic_ckpt or (base + "critic_ckpt_latest.pt")
+    policy_ckpt = args.policy_ckpt or (base + "policy_ckpt_latest.pt")
 
-        scores, timing = run_eval(cfg)
-        result = report(cfg.label, scores, timing)
+    # Verify checkpoints exist
+    for name, path in [("planner", planner_ckpt), ("critic", critic_ckpt), ("policy", policy_ckpt)]:
+        if not os.path.isfile(path):
+            print(f"ERROR: {name} checkpoint not found: {path}")
+            print(f"  Pass --{name}-ckpt explicitly or train first.")
+            return
 
-        if args.save_json:
-            with open(args.save_json, "w") as f:
-                json.dump(result, f, indent=2)
-            print(f"Results saved to {args.save_json}")
+    print(f"\n>>> Quick benchmark: {task}")
+    print(f"    envs={args.num_envs}, episodes={args.num_episodes}, "
+          f"seed={args.seed}, device={args.device}")
+    print(f"    planner: {planner_ckpt}")
+    print(f"    critic:  {critic_ckpt}")
+    print(f"    policy:  {policy_ckpt}")
+    print()
+
+    scores, timing = run_eval(
+        task=task, device=args.device,
+        num_envs=args.num_envs, num_episodes=args.num_episodes,
+        seed=args.seed,
+        planner_ckpt=planner_ckpt,
+        critic_ckpt=critic_ckpt,
+        policy_ckpt=policy_ckpt)
+
+    result = report(task, scores, timing)
+
+    # Save
+    if args.save_json:
+        with open(args.save_json, "w") as f:
+            json.dump(result, f, indent=2)
+        print(f"Results saved to {args.save_json}")
+
+    # Compare
+    if args.baseline:
+        with open(args.baseline) as f:
+            baseline = json.load(f)
+        compare_with_baseline(result, baseline)
 
 
 if __name__ == "__main__":

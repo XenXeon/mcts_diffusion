@@ -61,6 +61,16 @@ TASKS = {
     "antmaze-large-diverse-v2":  {"domain": "antmaze", "max_path_length": 1000, "planner_horizon": 40, "stride": 25, "planner_temperature": 1.0, "discount": 0.997, "planner_depth": 8},
 }
 
+def resolve_ckpt(provided, base, name):
+    # If the user passed a specific path via args, use it
+    if provided:
+        return provided
+    
+    latest = os.path.join(base, f"{name}_ckpt_latest.pt")
+    milestone = os.path.join(base, f"{name}_ckpt_1000000.pt")
+    
+    # Check if 'latest' exists, otherwise fall back to '1000000'
+    return latest if os.path.exists(latest) else milestone
 
 def get_ckpt_base(task: str) -> str:
     """Build the default checkpoint directory for a task."""
@@ -375,9 +385,9 @@ def main():
     else:
         base = ""
 
-    planner_ckpt = args.planner_ckpt or (base + "planner_ckpt_latest.pt")
-    critic_ckpt = args.critic_ckpt or (base + "critic_ckpt_latest.pt")
-    policy_ckpt = args.policy_ckpt or (base + "policy_ckpt_latest.pt")
+    planner_ckpt = resolve_ckpt(args.planner_ckpt, base, "planner")
+    critic_ckpt  = resolve_ckpt(args.critic_ckpt,  base, "critic")
+    policy_ckpt  = resolve_ckpt(args.policy_ckpt,  base, "policy")
 
     # Verify checkpoints exist
     for name, path in [("planner", planner_ckpt), ("critic", critic_ckpt), ("policy", policy_ckpt)]:

@@ -57,3 +57,8 @@ local_scheme = "dirty-tag"
 
 [tool.setuptools.packages.find]
 include = ["cleandiffuser"]
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: marks tests that require a real model checkpoint and GPU",
+]

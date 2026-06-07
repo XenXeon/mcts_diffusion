@@ -15,6 +15,7 @@ Theoretical storage cost per node (fp32 floats, obs_dim=4, H=32):
 from __future__ import annotations
 
 import math
+import random
 from dataclasses import dataclass
 from typing import List, Optional
 
@@ -194,7 +195,11 @@ class MCTSNode:
         tied = [ch for ch, u in zip(self._children, ucb_scores) if u == max_ucb]
         if self.config.ucb_tie_breaking == "greedy":
             return tied[0]
-        return tied[torch.randint(len(tied), (1,)).item()]
+        # Use Python's random module, NOT torch.randint, so UCB selection does
+        # not consume from PyTorch's global RNG and corrupt the policy's
+        # DDIM sampling sequence.  random is seeded by set_seed() so results
+        # remain deterministic given the same seed.
+        return random.choice(tied)
 
     # ── Mutation ───────────────────────────────────────────────────────────────
 

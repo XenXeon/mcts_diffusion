@@ -9,10 +9,25 @@ DVHorizonCritic, and returns them sorted by critic score (descending).
 Normalisation and unnormalisation are the caller's responsibility.
 The planner's fix_mask (which clamps trajectory position-0 to the start state) must
 be configured at planner construction time — this module does not touch it.
+
+Uncertainty penalty (Phase 5)
+------------------------------
+When uncertainty_beta > 0, each expansion's K raw critic scores are penalised by
+β × std(scores) before sorting.  Subtracting a constant shift preserves ordering
+within an expansion, but expansions whose K candidates disagree widely (high σ)
+receive lower values that are backpropagated into the tree, steering future
+selection away from high-variance (unreliable) regions of the plan space.
+
+    penalised_score_k = raw_score_k − β × std(raw_scores)
+
+The penalty is a scalar across all K candidates of one expansion, so it does not
+change which trajectory is ranked first within that expansion — it only changes
+the magnitude of the value that is backpropagated relative to other expansions.
+β=0 (default) recovers original behaviour exactly.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import torch
 
@@ -22,6 +37,11 @@ class ExpansionConfig:
     """Immutable configuration for one expansion call.
 
     Mirrors the maze2d-umaze-v1 production settings by default; override per task.
+
+    Args:
+        uncertainty_beta: Phase 5 uncertainty penalty coefficient.  Each
+            expansion's K critic scores are shifted by −β × std(scores) before
+            backpropagation.  Set to 0.0 (default) to disable.
     """
     K: int            # number of candidate trajectories
     horizon: int      # H — number of jump-step waypoints in each trajectory
@@ -32,6 +52,7 @@ class ExpansionConfig:
     temperature: float
     use_ema: bool
     device: str       # torch device string, e.g. "cpu" or "cuda:0"
+    uncertainty_beta: float = 0.0  # Phase 5 penalty coefficient (β ≥ 0)
 
 
 @dataclass
@@ -74,6 +95,21 @@ class PlannerExpansion:
         self.critic = critic
         self.cfg = config
 
+    # ── Uncertainty penalty ────────────────────────────────────────────────────
+
+    def _penalise(self, scores: torch.Tensor) -> torch.Tensor:
+        """Apply uncertainty penalty: scores − β × std(scores).
+
+        Operates on a (K,) score tensor from a single expansion.  Returns the
+        penalised scores; ordering may change only if β < 0 (never intended).
+        A no-op when cfg.uncertainty_beta == 0 or K == 1.
+        """
+        if self.cfg.uncertainty_beta == 0.0 or scores.shape[0] < 2:
+            return scores
+        return scores - self.cfg.uncertainty_beta * scores.std()
+
+    # ── Single-state expansion ─────────────────────────────────────────────────
+
     def expand(self, s_norm: torch.Tensor) -> ExpansionResult:
         """Generate and rank K candidate trajectories from start state s_norm.
 
@@ -82,7 +118,7 @@ class PlannerExpansion:
 
         Returns:
             ExpansionResult — trajs (K, H, planner_dim) and scores (K,) sorted
-            descending by critic value.
+            descending by penalised critic value.
 
         Raises:
             ValueError: if s_norm.shape != (obs_dim,).
@@ -116,8 +152,11 @@ class PlannerExpansion:
             # critic returns (K, 1); squeeze to (K,)
             scores = self.critic(trajs).squeeze(-1)
 
+        scores = self._penalise(scores)
         order = torch.argsort(scores, descending=True)
         return ExpansionResult(trajs=trajs[order], scores=scores[order])
+
+    # ── Batched expansion ──────────────────────────────────────────────────────
 
     def expand_batch(self, states: torch.Tensor) -> list:
         """Generate K candidate trajectories for each of N start states in one GPU call.
@@ -126,7 +165,7 @@ class PlannerExpansion:
             states: (N, obs_dim) normalised start observations.
 
         Returns:
-            List of N ExpansionResults, each sorted descending by critic score.
+            List of N ExpansionResults, each sorted descending by penalised critic score.
         """
         cfg = self.cfg
         N = states.shape[0]
@@ -160,6 +199,7 @@ class PlannerExpansion:
         for i in range(N):
             s = scores[i * cfg.K:(i + 1) * cfg.K]
             t = trajs[i * cfg.K:(i + 1) * cfg.K]
+            s = self._penalise(s)
             order = torch.argsort(s, descending=True)
             results.append(ExpansionResult(trajs=t[order], scores=s[order]))
         return results

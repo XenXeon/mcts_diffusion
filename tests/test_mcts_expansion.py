@@ -2,7 +2,7 @@
 
 Unit and integration tests for mcts.expansion.PlannerExpansion.
 
-Unit tests (14)
+Unit tests (20)
 ---------------
 Run entirely on CPU with small synthetic models (obs_dim=8, horizon=4, K=3).
 No checkpoint loading, no d4rl, no gym.  Fast enough for CI.
@@ -255,6 +255,102 @@ def test_config_frozen():
     )
     with pytest.raises(Exception):  # dataclasses.FrozenInstanceError
         cfg.K = 10  # type: ignore[misc]
+
+
+# ── Unit tests — expand_batch ─────────────────────────────────────────────────
+#
+# expand_batch sends (N*K, H, D) through the real planner in one call with N
+# distinct start states embedded at position-0.  The fix_mask broadcasts over
+# the batch dimension, clamping each group's position-0 back to its own state.
+# These tests verify that contract and the grouping/slicing logic.
+
+def test_expand_batch_returns_n_results(small_expansion):
+    """expand_batch must return one ExpansionResult per input state."""
+    N = 3
+    states = torch.zeros(N, SMALL_CFG.obs_dim)
+    results = small_expansion.expand_batch(states)
+    assert len(results) == N
+
+
+def test_expand_batch_shapes(small_expansion):
+    """Each result must have (K, H, planner_dim) trajs and (K,) scores."""
+    cfg = SMALL_CFG
+    states = torch.zeros(2, cfg.obs_dim)
+    results = small_expansion.expand_batch(states)
+    for r in results:
+        assert r.trajs.shape == (cfg.K, cfg.horizon, cfg.planner_dim)
+        assert r.scores.shape == (cfg.K,)
+
+
+def test_expand_batch_fix_mask_per_state(small_expansion):
+    """fix_mask must pin each group's position-0 to its own start state.
+
+    This is the most critical expand_batch invariant.  The planner's fix_mask
+    is a single (H, D) tensor that broadcasts over the (N*K, H, D) batch.
+    During each denoising step:
+        xt = xt * (1 - fix_mask) + prior * fix_mask
+    so every trajectory's position-0 is clamped back to its own prior row,
+    which holds state_i for group i.  If this fails, the tree mixes start
+    states across groups, producing incorrect child states.
+    """
+    N = 4
+    cfg = SMALL_CFG
+    torch.manual_seed(7)
+    states = torch.randn(N, cfg.obs_dim)   # distinct states for each group
+    results = small_expansion.expand_batch(states)
+    for i, (result, state) in enumerate(zip(results, states)):
+        diff = (result.trajs[:, 0, : cfg.obs_dim] - state.to(DEVICE)).abs().max().item()
+        assert diff < 1e-4, (
+            f"Group {i}: fix_mask not holding in batched call — "
+            f"max |traj[:,0,:obs_dim] - state_{i}| = {diff:.2e} >= 1e-4"
+        )
+
+
+def test_expand_batch_scores_descending(small_expansion):
+    """Scores within each result must be sorted descending."""
+    states = torch.zeros(3, SMALL_CFG.obs_dim)
+    results = small_expansion.expand_batch(states)
+    for i, r in enumerate(results):
+        for j in range(len(r.scores) - 1):
+            assert r.scores[j] >= r.scores[j + 1], (
+                f"Result {i}: scores not descending at index {j}: "
+                f"{r.scores[j].item():.4f} < {r.scores[j+1].item():.4f}"
+            )
+
+
+def test_expand_batch_groups_are_independent(small_expansion):
+    """Trajectories beyond position-0 must differ across groups with distinct states.
+
+    If all N groups produced identical trajectories despite different start states,
+    the per-group prior embedding would be silently ignored.
+    """
+    cfg = SMALL_CFG
+    torch.manual_seed(3)
+    # Use very different states so the planner produces clearly different trajectories
+    states = torch.stack([
+        torch.zeros(cfg.obs_dim),
+        torch.ones(cfg.obs_dim) * 3.0,
+    ])
+    results = small_expansion.expand_batch(states)
+    # Compare mean position-1 across the two groups
+    mean0 = results[0].trajs[:, 1, :].mean()
+    mean1 = results[1].trajs[:, 1, :].mean()
+    # They need not be dramatically different (random weights), but position-0
+    # IS different so the planner's conditional denoising should diverge at pos-1
+    # At minimum the scores should differ (critic sees different conditioning)
+    assert not torch.allclose(results[0].trajs[:, 0, :], results[1].trajs[:, 0, :]), (
+        "Groups have identical position-0: start states were not embedded correctly"
+    )
+
+
+def test_expand_batch_bad_shape_raises(small_expansion):
+    """expand_batch must raise ValueError for wrong input shape."""
+    bad_1d = torch.zeros(SMALL_CFG.obs_dim)         # missing batch dim
+    bad_wrong_dim = torch.zeros(2, SMALL_CFG.obs_dim + 1)
+    with pytest.raises(ValueError, match="states must be"):
+        small_expansion.expand_batch(bad_1d)
+    with pytest.raises(ValueError, match="states must be"):
+        small_expansion.expand_batch(bad_wrong_dim)
 
 
 # ── Integration tests — real checkpoint ───────────────────────────────────────

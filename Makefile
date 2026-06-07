@@ -124,6 +124,86 @@ k-ablation-phase3:
 		$(IMAGE_DEV) \
 		python scripts/phase3_k_ablation.py
 
+# Phase 4 rollout tests (CPU only, no checkpoint)
+test-mcts-rollout-unit:
+	docker run --rm \
+		-v $(PWD):$(WORKDIR) \
+		-w $(WORKDIR) \
+		$(IMAGE_DEV) \
+		pytest tests/test_mcts_rollout.py -v
+
+# Phase 4 closed-loop evaluation: MCTS vs greedy (requires checkpoint + GPU)
+phase4:
+	docker run --gpus all --rm \
+		-v $(PWD):$(WORKDIR) \
+		-v $(D4RL_CACHE):/root/.d4rl \
+		-w $(WORKDIR) \
+		$(IMAGE_DEV) \
+		python scripts/phase4_mcts_rollout.py
+
+# Phase 4 ablation B: K-mismatch test (K=50, budget=1 vs greedy)
+ablation-B:
+	docker run --gpus all --rm \
+		-v $(PWD):/workspace \
+		-v $(D4RL_CACHE):/root/.d4rl \
+		-w /workspace \
+		$(IMAGE_DEV) \
+		python scripts/phase4_ablation.py --ablation B
+
+# Phase 4 ablation C: depth/budget sweep (K=10, budgets 12 22 52 102)
+ablation-C:
+	docker run --gpus all --rm \
+		-v $(PWD):/workspace \
+		-v $(D4RL_CACHE):/root/.d4rl \
+		-w /workspace \
+		$(IMAGE_DEV) \
+		python scripts/phase4_ablation.py --ablation C
+
+# Both ablations in sequence
+ablation-BC:
+	docker run --gpus all --rm \
+		-v $(PWD):/workspace \
+		-v $(D4RL_CACHE):/root/.d4rl \
+		-w /workspace \
+		$(IMAGE_DEV) \
+		python scripts/phase4_ablation.py --ablation B C
+
+# Phase 4 ablation D1: tie-breaking (greedy vs random) at K=10, budgets 12 and 22
+ablation-D1:
+	docker run --gpus all --rm \
+		-v $(PWD):/workspace \
+		-v $(D4RL_CACHE):/root/.d4rl \
+		-w /workspace \
+		$(IMAGE_DEV) \
+		python scripts/phase4_ablation.py --ablation D --tie-breakings greedy random --k5-budgets 6
+
+# Phase 4 ablation D2: K=5 fan-out sweep
+ablation-D2:
+	docker run --gpus all --rm \
+		-v $(PWD):/workspace \
+		-v $(D4RL_CACHE):/root/.d4rl \
+		-w /workspace \
+		$(IMAGE_DEV) \
+		python scripts/phase4_ablation.py --ablation D --tie-breakings random --k5-budgets 6 12 31 52
+
+# Full ablation D (D1 + D2 together)
+ablation-D:
+	docker run --gpus all --rm \
+		-v $(PWD):/workspace \
+		-v $(D4RL_CACHE):/root/.d4rl \
+		-w /workspace \
+		$(IMAGE_DEV) \
+		python scripts/phase4_ablation.py --ablation D
+
+# Phase 5 uncertainty penalty sweep (K=10, budget=12, seeds 0-14)
+ablation-E:
+	docker run --gpus all --rm \
+		-v $(PWD):/workspace \
+		-v $(D4RL_CACHE):/root/.d4rl \
+		-w /workspace \
+		$(IMAGE_DEV) \
+		python scripts/phase4_ablation.py --ablation E
+
 push:
 	docker tag $(IMAGE_DEV) $(DOCKERHUB_USER)/$(IMAGE_DEV)
 	docker push $(DOCKERHUB_USER)/$(IMAGE_DEV)
@@ -135,4 +215,4 @@ pull:
 	docker pull $(DOCKERHUB_USER)/$(IMAGE_DEV)
 	docker tag $(DOCKERHUB_USER)/$(IMAGE_DEV) $(IMAGE_DEV)
 
-.PHONY: build run test test-mcts-unit test-mcts smoke-phase2 test-mcts-tree-unit test-mcts-tree ablation-phase3 k-ablation-phase3 train eval render push pull upload
+.PHONY: build run test test-mcts-unit test-mcts smoke-phase2 test-mcts-tree-unit test-mcts-tree ablation-phase3 k-ablation-phase3 test-mcts-rollout-unit phase4 ablation-B ablation-C ablation-BC ablation-D1 ablation-D2 ablation-D ablation-E train eval render push pull upload

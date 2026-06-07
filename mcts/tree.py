@@ -255,7 +255,18 @@ class MCTSTree:
     # ── Query ──────────────────────────────────────────────────────────────────
 
     def best_path(self) -> List[MCTSNode]:
-        """Greedy highest-value path from root to a leaf."""
+        """Greedy highest-value path from root to a leaf.
+
+        At each node, picks the child with the highest value() (average critic
+        score from backpropagation).  Ties broken by Python's max() — first child
+        with the maximum value, which is children[0] (the highest critic-scored
+        candidate from expand()).  This is intentionally independent of
+        ucb_tie_breaking: UCB governs exploration; value-greedy governs extraction.
+
+        Depth note: with K candidates per expansion, step 0 expands the root
+        (1 budget slot) and steps 1..K expand its K unvisited children (UCB=∞).
+        Depth 3 requires budget ≥ K + 2; for K=10 that means budget ≥ 12.
+        """
         path = [self.root]
         node = self.root
         while not node.is_leaf:

@@ -160,7 +160,12 @@ class MCTSTree:
     # ── Backpropagation ────────────────────────────────────────────────────────
 
     def _backprop(self, node: MCTSNode, value: float) -> None:
-        """Walk from node to root, updating visit_count and value_sum."""
+        """Walk from node to root, updating visit_count and value_sum.
+
+        NOTE: this is MEAN backup (value() = value_sum / visit_count), the Phase 3/4
+        trajectory-critic search. The Phase C state-value search uses MAX (look-ahead)
+        backup — see mcts/value_forest.py. The two engines intentionally co-exist.
+        """
         current: Optional[MCTSNode] = node
         while current is not None:
             current.visit_count += 1

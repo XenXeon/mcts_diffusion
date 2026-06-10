@@ -220,9 +220,10 @@ def run_mcts_episode(
         path = tree.best_path()
         next_s_norm = path[1].s_norm if len(path) >= 2 else path[0].s_norm
 
-        last = records[-1]
-        depths.append(float(last.tree_depth))
-        cum_bests.append(float(last.cumulative_best))
+        if records:                       # empty only if max_expansions == 0
+            last = records[-1]
+            depths.append(float(last.tree_depth))
+            cum_bests.append(float(last.cumulative_best))
 
         act = _policy_action(s_norm, next_s_norm, policy, rollout_cfg)
         denoise_calls += rollout_cfg.policy_steps

@@ -5,19 +5,17 @@ Pure-Python tests for the value-MCTS search logic (no torch/numpy needed).
 A fake 1-D world: a node's `state` is a float position; the goal is at 10.0; value is
 -(distance to goal) so higher is better. Each expansion offers three moves: +3, +1, -1.
 This lets us check selection, max-backup, and look-ahead extraction deterministically.
-"""
-import sys, os, importlib.util
 
-# Load value_forest.py directly by path so we do NOT trigger mcts/__init__.py (which
-# imports torch via expansion.py). value_forest is intentionally torch-free.
-_VF_PATH = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "mcts", "value_forest.py")
-_spec = importlib.util.spec_from_file_location("value_forest", _VF_PATH)
-_vf = importlib.util.module_from_spec(_spec)
-sys.modules["value_forest"] = _vf          # needed so @dataclass can resolve annotations
-_spec.loader.exec_module(_vf)
-SearchNode, ValueForest, ForestConfig = _vf.SearchNode, _vf.ValueForest, _vf.ForestConfig
-select_leaf, backprop = _vf.select_leaf, _vf.backprop
+`import mcts` is torch-free: the package eagerly exports only the value-forest engine
+and specs; the legacy torch-importing engine is lazy (PEP 562). So a plain import works
+on machines without torch.
+"""
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from mcts import ForestConfig, SearchNode, ValueForest, backprop, select_leaf
 
 GOAL = 10.0
 MOVES = (3.0, 1.0, -1.0)   # K = 3 candidate steps

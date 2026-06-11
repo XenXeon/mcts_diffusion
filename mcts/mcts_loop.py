@@ -115,7 +115,10 @@ def load_models(env_name: str, value_step: str = "latest",
     return dict(planner=planner, critic=critic, value=value, policy=policy,
                 normalizer=normalizer, obs_dim=obs_dim, act_dim=act_dim, H=H,
                 stride=stride, max_path_length=spec["max_path_length"],
-                env_single=env_single, env_name=env_name, device=device, family=fam)
+                env_single=env_single, env_name=env_name, device=device, family=fam,
+                # resolved checkpoint identity (run_mcts_compare records these in the JSON)
+                value_step=value_step, planner_step=planner_step,
+                critic_step=critic_step, policy_step=policy_step, ckpt_dir=ckpt)
 
 
 # ── Sampler (MCSS + MCTS share the policy & env loop) ──────────────────────────
@@ -221,15 +224,30 @@ def run_episodes(sampler: Sampler, method: str, n_envs: int, n_episodes: int,
 
     set_seed(seed)
     env = gym.vector.make(env_name, n_envs)
-    try:
-        env.seed(seed)
-    except Exception:
-        pass
 
     all_success: List[np.ndarray] = []
+    all_goals: List[Any] = []
+    all_starts: List[Any] = []
     t0 = time.perf_counter()
     for ep in range(n_episodes):
-        obs = env.reset()
+        # Seed the sub-envs via gym's recommended API (env.seed() is deprecated and does
+        # NOT pin antmaze's per-reset goal for VectorEnvs). Seeding on ep 0 makes the whole
+        # episode sequence reproducible across processes, so every budget/method run that
+        # uses the same --seed sees the SAME scenarios => paired and comparable.
+        obs = env.reset(seed=seed if ep == 0 else None)
+        # Record per-rollout scenario identity so collate_mcts.py can verify pairing
+        # (same (env, seed) index = same scenario) and run McNemar. Best-effort: if the
+        # vector env can't expose the goal, store None and pairing is just left unverified.
+        all_starts.extend([[float(obs[i, 0]), float(obs[i, 1])] for i in range(n_envs)])
+        goals_ep = None
+        for attr in ("target_goal", "_target", "target"):
+            try:
+                gs = env.get_attr(attr)
+                goals_ep = [[float(g[0]), float(g[1])] for g in gs]
+                break
+            except Exception:
+                continue
+        all_goals.extend(goals_ep if goals_ep is not None else [None] * n_envs)
         ep_rew = np.zeros(n_envs, dtype=np.float64)
         active = np.ones(n_envs, dtype=bool)   # still in the FIRST episode (count rewards)
         for t in range(max_t):
@@ -255,11 +273,17 @@ def run_episodes(sampler: Sampler, method: str, n_envs: int, n_episodes: int,
 
     flat = np.concatenate(all_success)
     norm = np.array([env_single.get_normalized_score(x) for x in flat]) * 100.0
+    p = float(flat.mean())
+    reach_err = float(np.sqrt(max(p * (1.0 - p), 0.0) / flat.size) * 100.0)  # binomial SEM
     out = dict(method=method, n_rollouts=int(flat.size),
-               reach_pct=float(flat.mean() * 100.0),
+               reach_pct=float(p * 100.0),
+               reach_err=reach_err,
                norm_mean=float(norm.mean()),
                norm_err=float(norm.std() / np.sqrt(flat.size)),
-               wall_s=round(time.perf_counter() - t0, 1))
+               wall_s=round(time.perf_counter() - t0, 1),
+               # paired per-rollout vectors (episode-major) for collate_mcts.py / McNemar
+               success=[int(x) for x in flat],
+               goals=all_goals, starts=all_starts)
     if verbose:
         print(f"  [{method}] DONE  reach={out['reach_pct']:.1f}%  "
               f"norm={out['norm_mean']:.1f}±{out['norm_err']:.1f}  "

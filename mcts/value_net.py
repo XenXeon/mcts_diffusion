@@ -101,6 +101,71 @@ class DVStateValue(nn.Module):
         )
 
 
+class DVStateValueEnsemble(nn.Module):
+    """Ensemble of N independent DVStateValue heads (plan v5.1 §3a).
+
+    Input convention: the caller concatenates [state, goal_xy] on the last dim
+    for the goal-conditioned critic (in_dim = obs_dim + 2); plain V(s) ensembles
+    take in_dim = obs_dim. Pessimism at inference is `pessimistic()`:
+    mode="min" (headline) or "mean_std" (mean − β·std, ablation) — this addresses
+    epistemic error; aleatoric behaviour-spread is handled at training time by
+    the expectile loss (R5.2), the two are orthogonal by design.
+    """
+
+    def __init__(self, in_dim: int, n_members: int = 5, hidden_dim: int = 256,
+                 depth: int = 3, dropout: float = 0.0,
+                 goal_conditioned: bool = False) -> None:
+        super().__init__()
+        if n_members < 1:
+            raise ValueError(f"n_members must be >= 1, got {n_members}")
+        self.in_dim = in_dim
+        self.n_members = n_members
+        self.goal_conditioned = goal_conditioned
+        self._hparams = dict(hidden_dim=hidden_dim, depth=depth, dropout=dropout)
+        self.members = nn.ModuleList(
+            DVStateValue(in_dim, hidden_dim=hidden_dim, depth=depth,
+                         dropout=dropout) for _ in range(n_members))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """x: (..., in_dim) -> per-member values (..., n_members)."""
+        return torch.cat([m(x) for m in self.members], dim=-1)
+
+    def pessimistic(self, x: torch.Tensor, mode: str = "min",
+                    beta: float = 1.0) -> torch.Tensor:
+        """x: (..., in_dim) -> (..., 1) pessimistic value."""
+        v = self.forward(x)
+        if mode == "min":
+            return v.min(dim=-1, keepdim=True).values
+        if mode == "mean_std":
+            return (v.mean(dim=-1, keepdim=True)
+                    - beta * v.std(dim=-1, keepdim=True))
+        raise ValueError(f"unknown pessimism mode {mode!r}")
+
+    def disagreement(self, x: torch.Tensor) -> torch.Tensor:
+        """Per-input member std — the logged ensemble-disagreement diagnostic."""
+        return self.forward(x).std(dim=-1, keepdim=True)
+
+    def save(self, path: str, **extra) -> None:
+        torch.save(dict(ensemble=[m.state_dict() for m in self.members],
+                        in_dim=self.in_dim, n_members=self.n_members,
+                        goal_conditioned=self.goal_conditioned,
+                        **self._hparams, **extra), path)
+
+
+def load_value_ensemble(path: str, device: str = "cpu") -> DVStateValueEnsemble:
+    """Load a DVStateValueEnsemble checkpoint (architecture from metadata)."""
+    ckpt = torch.load(path, map_location=device, weights_only=False)
+    net = DVStateValueEnsemble(
+        ckpt["in_dim"], n_members=ckpt["n_members"],
+        hidden_dim=ckpt.get("hidden_dim", 256), depth=ckpt.get("depth", 3),
+        dropout=ckpt.get("dropout", 0.0),
+        goal_conditioned=ckpt.get("goal_conditioned", False)).to(device)
+    for m, sd in zip(net.members, ckpt["ensemble"]):
+        m.load_state_dict(sd)
+    net.eval()
+    return net
+
+
 def load_state_value(
     path: str,
     device: str = "cpu",

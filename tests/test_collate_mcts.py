@@ -13,8 +13,8 @@ import tempfile
 sys.path.insert(0, os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts"))
 
-from collate_mcts import (binom_err_pct, candidates_per_step, load_rows,
-                          mcnemar_exact, pairing_check, print_mcnemar)
+from collate_mcts import (binom_err_pct, candidates_per_step, config_suffix,
+                          load_rows, mcnemar_exact, pairing_check, print_mcnemar)
 
 
 def _pairs(fixes, breaks, both_reach=10, both_miss=2):
@@ -135,6 +135,33 @@ def test_pairing_check_flags_large_start_divergence():
     b = dict(goals=g, starts=[[3.0, 0.0]])                    # a different cell entirely
     ok, note = pairing_check(a, b)
     assert ok and "suspect" in note
+
+
+def test_config_suffix_naive_and_hardened():
+    # naive 2×2 cells + all pre-hardening cells carry no value/gate keys → no suffix
+    assert config_suffix({}) == ""
+    assert config_suffix({"value_mode": "v_s"}) == ""
+    assert config_suffix({"value_mode": "v_s", "gate": "none"}) == ""
+    # hardened variants are each distinct (B2)
+    assert config_suffix({"value_mode": "v_sg"}) == "-sg"                  # cell E
+    assert config_suffix({"value_mode": "v_sg_pess", "gate": "hard"}) == "-sgPg"  # cell B
+    assert config_suffix({"value_mode": "v_s", "gate": "hard"}) == "-g"    # gate-only rung
+
+
+def test_hardened_cells_get_distinct_labels():
+    with tempfile.TemporaryDirectory() as tmp:
+        naive = _write(tmp, "naive.json", dict(
+            env="antmaze", seed=0, k_mcts=16, budget=16,
+            results=dict(mcts=dict(n_rollouts=2, reach_pct=86.0, wall_s=1.0,
+                                   success=[1, 0]))))
+        hard = _write(tmp, "hard.json", dict(
+            env="antmaze", seed=0, k_mcts=16, budget=16,
+            value_mode="v_sg_pess", gate="hard",
+            results=dict(mcts=dict(n_rollouts=2, reach_pct=90.0, wall_s=1.0,
+                                   success=[1, 1]))))
+        rows = load_rows([naive, hard])
+    labels = sorted(r["label"] for r in rows)
+    assert labels == ["b16", "b16-sgPg"]            # naive vs cell B, distinguishable
 
 
 def test_child_index_label_and_depth_field():

@@ -77,6 +77,29 @@ def max_episode_steps(env: Any, env_name: str) -> int:
     return int(spec_for(env_name)["max_path_length"])
 
 
+def normalize_goal_xy(normalizer: Any, xy: Any):
+    """Normalise a raw goal (x, y) to the critic's goal-input scale.
+
+    THE single source for goal normalisation (plan v5.1 C1): training uses
+    goal = seq_obs[..., :2], i.e. the GaussianNormalizer-normalised xy dims, so
+    inference must normalise the raw goal with the SAME [0:2] statistics. D1, D4,
+    and the Stage-2 sampler all call this — a second, subtly-different inlined
+    version (wrong dims / forgotten normalisation) is the most likely train/deploy
+    skew, so there must be exactly one.
+
+    Accepts (2,) or (N, 2); returns the same shape, float32.
+    """
+    import numpy as np
+    arr = np.asarray(xy, dtype=np.float32)
+    single = arr.ndim == 1
+    pts = arr.reshape(-1, 2)
+    obs_dim = np.asarray(normalizer.mean).reshape(-1).shape[0]
+    padded = np.zeros((pts.shape[0], obs_dim), dtype=np.float32)
+    padded[:, :2] = pts
+    g = normalizer.normalize(padded)[:, :2].astype(np.float32)
+    return g[0] if single else g
+
+
 def get_goal(e: Any):
     """Eval goal (x, y) of a single (non-vector) env, robust across d4rl versions.
 

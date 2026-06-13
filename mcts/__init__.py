@@ -12,6 +12,7 @@ exported LAZILY via PEP 562 so that `import mcts` works without torch installed:
     MCTSEdge / MCTSNode / TreeConfig                       (mcts.node)
     MCTSTree / StepRecord                                  (mcts.tree)
     DVStateValue / load_state_value                        (mcts.value_net)
+    DVStateValueEnsemble / load_value_ensemble             (mcts.value_net)
 """
 from .specs import SPECS, TARGET_CFG, env_family
 from .value_forest import (ForestConfig, SearchNode, ValueForest, backprop,
@@ -30,6 +31,8 @@ _LAZY = {
     "StepRecord": ("mcts.tree", "StepRecord"),
     "DVStateValue": ("mcts.value_net", "DVStateValue"),
     "load_state_value": ("mcts.value_net", "load_state_value"),
+    "DVStateValueEnsemble": ("mcts.value_net", "DVStateValueEnsemble"),
+    "load_value_ensemble": ("mcts.value_net", "load_value_ensemble"),
 }
 
 __all__ = [

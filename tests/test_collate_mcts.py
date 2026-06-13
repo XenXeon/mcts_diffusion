@@ -137,6 +137,27 @@ def test_pairing_check_flags_large_start_divergence():
     assert ok and "suspect" in note
 
 
+def test_child_index_label_and_depth_field():
+    with tempfile.TemporaryDirectory() as tmp:
+        p1 = _write(tmp, "l1.json", dict(
+            env="antmaze", seed=0, k_mcts=16, budget=16, child_index=1,
+            results=dict(mcts=dict(n_rollouts=4, reach_pct=75.0, wall_s=1.0,
+                                   tree_depth_mean=3.4, success=[1, 1, 1, 0]))))
+        p4 = _write(tmp, "l4.json", dict(
+            env="antmaze", seed=0, k_mcts=16, budget=16, child_index=4,
+            results=dict(mcts=dict(n_rollouts=4, reach_pct=75.0, wall_s=1.0,
+                                   success=[1, 1, 1, 0]))))
+        old = _write(tmp, "old.json", dict(           # pre-cidx JSONs: no child_index key
+            env="antmaze", seed=0, k_mcts=16, budget=8,
+            results=dict(mcts=dict(n_rollouts=4, reach_pct=50.0, wall_s=1.0))))
+        rows = load_rows([p1, p4, old])
+    labels = sorted(r["label"] for r in rows)
+    assert labels == ["b16", "b16L4", "b8"]           # cidx=1 and absent → plain; cidx=4 → suffixed
+    by_label = {r["label"]: r for r in rows}
+    assert by_label["b16"]["depth"] == 3.4
+    assert by_label["b16L4"]["depth"] is None         # tolerant when not recorded
+
+
 def test_print_mcnemar_pairs_and_skips():
     """Same (env, seed): equal-length pair runs; unequal-length pair is skipped."""
     a, b = _pairs(fixes=3, breaks=0)

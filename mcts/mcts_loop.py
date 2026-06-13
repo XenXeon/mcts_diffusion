@@ -132,6 +132,9 @@ class Sampler:
         self.plan_steps, self.policy_steps = plan_steps, policy_steps
         self.planner_temp, self.policy_temp = planner_temp, policy_temp
         self.solver, self.policy_solver, self.rebase = solver, policy_solver, rebase
+        # Per-step forest stats from the latest mcts_waypoints call (one dict per tree:
+        # n_nodes / max_depth / root_best_value); run_episodes aggregates realized depth.
+        self.last_tree_stats: Optional[List[dict]] = None
         if not (1 <= child_index < self.H):
             raise ValueError(f"child_index must be in [1, H-1]={self.H-1}, got {child_index}")
 
@@ -164,6 +167,10 @@ class Sampler:
         forest = ValueForest([s_norm[i] for i in range(M)], self.expand_fn,
                              ForestConfig(k=self.k_mcts, budget=self.budget, c_ucb=self.c_ucb))
         forest.run()
+        # Realized look-ahead: with child_index=L, a depth-d tree has seen d*L waypoints
+        # (= d*L*stride dense steps) before committing. Logged so the depth the UCB
+        # search ACTUALLY reaches is measured, not assumed.
+        self.last_tree_stats = forest.stats()
         wps = forest.best_first_waypoints()
         return np.stack([wps[i] if wps[i] is not None else s_norm[i] for i in range(M)])
 
@@ -235,11 +242,7 @@ def run_episodes(sampler: Sampler, method: str, n_envs: int, n_episodes: int,
     # Synchronous vector env: stepping cost is negligible next to the diffusion
     # sampling, and the sub-envs stay reachable (env.envs) for per-episode goal
     # capture — the async default hides them in worker processes.
-
-    #env = gym.vector.make(env_name, n_envs)
-
     env = gym.vector.make(env_name, n_envs, asynchronous=False)
-    
     # Scenario pairing — verified on the eval box (smoke runs, 2026-06-10):
     #   * GOALS are a pure function of (seed, index): d4rl antmaze samples the goal
     #     via the GLOBAL np.random (d4rl/locomotion/maze_env.py set_target_goal),
@@ -273,6 +276,7 @@ def run_episodes(sampler: Sampler, method: str, n_envs: int, n_episodes: int,
     all_reach_step: List[np.ndarray] = []
     all_starts: List[np.ndarray] = []
     all_goals: List[List[Optional[List[float]]]] = []
+    depth_sum, depth_n, depth_max = 0.0, 0, 0   # realized tree depth (mcts only)
     t0 = time.perf_counter()
     for ep in range(n_episodes):
         obs = env.reset()
@@ -292,6 +296,11 @@ def run_episodes(sampler: Sampler, method: str, n_envs: int, n_episodes: int,
                 next_wp = sampler.mcss_waypoints(s_norm)
             else:
                 next_wp = sampler.mcts_waypoints(s_norm)
+                for st_t in (sampler.last_tree_stats or []):
+                    depth_sum += st_t["max_depth"]
+                    depth_n += 1
+                    if st_t["max_depth"] > depth_max:
+                        depth_max = st_t["max_depth"]
             act = sampler.policy_action(s_norm, next_wp)
             obs, rew, done, info = env.step(act)
             # gym.vector auto-resets an env on done; count rewards only within each env's
@@ -326,9 +335,15 @@ def run_episodes(sampler: Sampler, method: str, n_envs: int, n_episodes: int,
                success=[int(x > 0) for x in flat],
                reach_step=[int(s) if s >= 0 else None for s in flat_reach_step],
                starts=[xy.tolist() for ep_s in all_starts for xy in ep_s],
-               goals=[g for ep_g in all_goals for g in ep_g])
+               goals=[g for ep_g in all_goals for g in ep_g],
+               # realized search depth (mcts only): mean/max of per-tree max depth over
+               # all env-steps; look-ahead distance = depth × child_index × stride
+               tree_depth_mean=round(depth_sum / depth_n, 2) if depth_n else None,
+               tree_depth_max=int(depth_max) if depth_n else None)
     if verbose:
+        depth_str = (f"  tree_depth={out['tree_depth_mean']:.1f} (max {out['tree_depth_max']})"
+                     if out["tree_depth_mean"] is not None else "")
         print(f"  [{method}] DONE  reach={out['reach_pct']:.1f}%±{out['reach_err']:.1f}  "
               f"norm={out['norm_mean']:.1f}±{out['norm_err']:.1f}  "
-              f"(n={out['n_rollouts']}, {out['wall_s']:.0f}s)")
+              f"(n={out['n_rollouts']}, {out['wall_s']:.0f}s){depth_str}")
     return out

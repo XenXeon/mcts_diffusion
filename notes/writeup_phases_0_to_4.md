@@ -12,8 +12,9 @@
 
 The project asked whether wrapping the DV-MCSS diffusion planner in Monte-Carlo Tree
 Search (MCTS) improves closed-loop control on maze2d. After building and verifying the
-full stack (Phases 0–3) and running controlled closed-loop comparisons (Phase 4), the
-answer is **no, and the experiments explain why with a clear mechanism**:
+full stack (Phases 0–3), running controlled closed-loop comparisons (Phase 4), and
+directly testing the two candidate "fixable flaw" explanations (Phase 5), the answer is
+**no, and the experiments explain why with a clear mechanism**:
 
 1. **Tree search is neutral at matched candidate count.** On `maze2d-large`,
    MCTS-K10 (182.8) ≈ greedy-K10 (183.4); the entire apparent deficit vs the K=50
@@ -28,6 +29,12 @@ answer is **no, and the experiments explain why with a clear mechanism**:
 The binding constraint is **model quality (planner/critic/policy), not the planning-time
 search strategy.** The contribution is a quantified, mechanistic negative result telling
 the field *where not to spend compute* on diffusion planners.
+
+**Phase 5 closes the "is the ceiling fixable?" question.** Both proposed design fixes are
+refuted: branching the tree where the K plans actually diverge (not the degenerate
+waypoint 1) is ≈ the wp1 design and *decreases* with branch distance — wp1 is in fact
+optimal; and the critic is well-calibrated (Pearson r ≈ 0.44, flat) at every tree depth
+with no off-manifold drift. The ceiling is **intrinsic redundancy**, not a defect.
 
 A second, important correction emerged during Phase 1/4 analysis: the critic, initially
 suspected to be the bottleneck (a weak `r=−0.116` calibration number), is in fact
@@ -303,7 +310,91 @@ difficulty, the **opposite** of the hypothesis):
 
 ---
 
-## 7. Synthesis — why MCTS does not help
+## 7. Phase 5 — Diagnosing whether the ceiling is fixable
+
+Phases 0–4 showed MCTS ties greedy at matched K and never beats greedy-K50. Phase 5 asks
+the follow-up: is that ceiling an **intrinsic redundancy** or a **fixable design flaw**?
+Two concrete flaws were proposed and tested head-on — the tree branches on waypoint 1
+(where the K plans are nearly identical), and the critic might mis-score the imagined
+states the tree creates at depth. **Both are refuted.**
+
+### 7a. Plan diversity vs branch point (`phase5_plan_diversity.py`)
+Mean pairwise L2 among K=50 plans at each waypoint (normalised obs space), 30 starts:
+
+| waypoint (dense steps) | umaze | medium | large |
+|---|---|---|---|
+| 1 (15) — *where MCTS branches* | 0.085 (1.0×) | 0.066 (1.0×) | 0.073 (1.0×) |
+| 8 (120) | 1.22 (14.5×) | 0.99 (15.0×) | 0.84 (11.6×) |
+| 16 (240) — *peak* | 1.41 (16.7×) | 1.51 (23.0×) | 1.32 (18.2×) |
+| 31 (465) | 0.77 (9.1×) | 1.22 (18.5×) | 1.18 (16.3×) |
+
+Two facts, consistent across all three mazes: (i) the K plans are **~16× tighter at
+waypoint 1 than at their most diverse point** — branching at wp1 captures only ~6 % of the
+available trajectory diversity; (ii) diversity is a **hump** — it peaks mid-horizon (wp16)
+and *re-converges* by wp31 as the plans funnel back toward the same goal. So the structural
+critique is quantified, and it predicts where a "fix" would branch (mid-horizon, ~wp8–16).
+
+### 7b. child_state_index ablation (Ablation F, `phase5_child_index_ablation.py`)
+Branch the tree at `cidx ∈ {1,4,8,16}` in two modes — **matched** (policy also targets
+wp cidx) and **split** (tree branches at cidx but the policy is commanded toward wp 1,
+keeping it in-distribution). Large, seeds 0–4:
+
+| cidx | matched | split | (greedy = 191.4, cidx1 = 182.8) |
+|---|---|---|---|
+| 1 | **182.8** | — | the current design |
+| 4 | 159.9 | 180.4 | |
+| 8 | **54.1** | 177.7 | |
+| 16 | **54.2** | 173.9 | |
+
+The fair test is **split** (diverse branching + healthy policy): it gives 180→174 —
+**≈ cidx=1, always below greedy, and *decreasing* with cidx**. Branching where the plans
+actually diverge does not help; it slowly hurts. The hypothesis is not merely refuted but
+**inverted: wp1 is the optimal branch point.** (matched collapses for cidx>1 because the
+policy receives a target far outside its 1-step training range — see 7d.)
+
+### 7c. Depth-stratified critic calibration (`phase5_critic_depth_calibration.py`)
+Build depth-d imagined states by chaining d planner jumps (exactly as MCTS descends),
+generate K=20 plans from each over 20 starts (n=400/depth), execute every plan, correlate
+critic score with true return. umaze:
+
+| depth | Pearson r | nn-dist to data | mean critic |
+|---|---|---|---|
+| 0 | 0.45 | 0.101 | 0.31 |
+| 1 | 0.43 | 0.100 | 0.39 |
+| 2 | 0.44 | 0.091 | 0.31 |
+| 3 | 0.44 | 0.080 | 0.43 |
+
+Calibration is **flat (~0.44) across depth** and `nn-dist` to the dataset *decreases* —
+imagined states do **not** drift off-manifold as the tree descends, and the critic does
+**not** mis-score them. (r≈0.44 at n=400 also re-confirms the critic is genuinely decent;
+Phase 1's −0.116 was the underpowered, range-restricted artifact.) The
+"OOD-critic-at-depth" hypothesis is refuted.
+
+### 7d. Why some episodes return exactly 0 (`phase5_zero_return_diagnosis.py`)
+cidx>1 runs produce bimodal returns (decent or exactly 0). An instrumented closed loop
+(per-step target displacement, action saturation, distance-to-goal, tree value) attributes
+each 0. **Validation first:** raw env `rew==1` ⟺ the `dist<0.5` goal proxy on **0/3600**
+steps, and `latched_return` matches every episode return — the metrics are exact. The 0s
+fall into three non-bug signatures:
+
+| signature | evidence | closest-approach position | cause |
+|---|---|---|---|
+| **matched cidx>1** | `tgt_disp≈2.1`, `act_sat≈0.9`, dist plateaus at 1.4–1.5 | pinned at wall **x≈2.4** (goal ≈ (0.9,1.0)) | policy OOD → can't navigate to a far target |
+| **split cidx>1 (near-miss)** | in-dist (`tgt_disp 0.57`, `act_sat 0.20`), goal-directed targets, lingers ~30 steps then leaves | **beside the goal**, dist ≈ 0.80 | mis-aligned final approach (tree selects post-goal children on near-noise) |
+| **split, slow** | distance still *descending* at t=300 | en route | far-branching path too slow to finish the episode |
+
+None is a harness bug, and crucially **none is fixable by moving the branch point — each
+*is* the cost of moving it.**
+
+### Phase 5 verdict
+Both "fixable flaw" explanations are dead: branching further out (where diversity is real)
+hurts monotonically, and the critic is well-calibrated at every tree depth. The MCTS
+ceiling is **intrinsic redundancy**, not a design defect. cidx=1 enters the goal basin
+cleanly (min-dist 0.00–0.02) and ties greedy, which sits at the system ceiling.
+
+---
+
+## 8. Synthesis — why MCTS does not help
 
 The mechanism is consistent across every controlled experiment:
 
@@ -323,13 +414,14 @@ The mechanism is consistent across every controlled experiment:
   one argmax). Hence MCTS degrades *monotonically with difficulty* (−26 on seed 2).
 
 **The only effective lever is candidate count K, and it saturates by ~50.** Beyond that,
-the binding constraint is model quality, not planning-time search.
+the binding constraint is model quality, not planning-time search. Phase 5 closes the loop:
+the ceiling is not a fixable search-design flaw (branch point or critic) — it is intrinsic.
 
 ---
 
-## 8. Methodological lessons (where earlier conclusions were wrong)
+## 9. Methodological lessons (where earlier conclusions were wrong)
 
-This investigation reversed three intermediate conclusions; recording them as a guard
+This investigation reversed four intermediate conclusions; recording them as a guard
 against the same errors:
 
 1. **"The critic is bad" (from `r=−0.116`) — FALSE.** The number was underpowered (n=30,
@@ -342,14 +434,18 @@ against the same errors:
    light.
 3. **"More breadth keeps winning (K=120 > K=50)" — FALSE.** Breadth saturates by K≈50.
    Lesson: test the saturation point, don't extrapolate a trend.
+4. **"Branching at wp1 is a bottleneck" — FALSE (inverted).** Branching where the plans
+   diverge (cidx 4/8/16, split mode) is ≈ cidx=1 and *decreasing* with cidx — wp1 is the
+   optimal branch point. Lesson: a quantified structural defect (wp1 = 6 % of peak
+   diversity) is not automatically a *performance* defect; test it before assuming.
 
 General lesson reinforced throughout: **seed-match every comparison** (single-episode
-maze2d variance is ±20–70 points) and **add matched controls** (matched-K, matched-budget)
-before attributing an effect.
+maze2d variance is ±20–70 points) and **add matched controls** (matched-K, matched-budget,
+matched-plan-budget, in-distribution-policy split) before attributing an effect.
 
 ---
 
-## 9. Limitations and future directions
+## 10. Limitations and future directions
 
 - **n=5 seeds** per env in closed-loop; per-seed deltas on hard seeds (±6) are within
   single-episode noise. The *aggregate* and *matched* trends are robust; individual
@@ -369,7 +465,7 @@ tweak:
 
 ---
 
-## 10. Recommended default
+## 11. Recommended default
 
 For DV-MCSS on maze2d: **greedy K=50** (single expansion per step). It reaches the
 performance ceiling at the lowest compute. Tree search spends ~3× the compute to
@@ -386,3 +482,4 @@ underperform it; breadth beyond K=50 wastes compute for no gain.
 | 2 | `phase2_smoke_test.py` | `mcts/expansion.py` + tests |
 | 3 | `phase3_ablation.py`, `phase3_k_ablation.py` | `results/phase3/{summary,k_summary}.csv` |
 | 4 | `phase4_mcts_rollout.py`, `phase4_ablation.py`, `phase5_headroom_diagnostic.py` | `results/phase4/`, `results/phase4_ablation/`, `results/phase4_large/` |
+| 5 | `phase5_plan_diversity.py`, `phase5_child_index_ablation.py`, `phase5_critic_depth_calibration.py`, `phase5_zero_return_diagnosis.py`, `inspect_zero_traces.py` | `results/phase5/` |

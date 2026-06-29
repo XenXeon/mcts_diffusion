@@ -13,8 +13,9 @@ import tempfile
 sys.path.insert(0, os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts"))
 
-from collate_mcts import (binom_err_pct, candidates_per_step, config_suffix,
-                          load_rows, mcnemar_exact, pairing_check, print_mcnemar)
+from collate_mcts import (_precedence, binom_err_pct, candidates_per_step,
+                          config_suffix, load_rows, mcnemar_exact, pairing_check,
+                          print_mcnemar)
 
 
 def _pairs(fixes, breaks, both_reach=10, both_miss=2):
@@ -200,6 +201,53 @@ def test_print_mcnemar_pairs_and_skips():
              success=[1, 0, 1, 0], file="c.json"),   # n mismatch → skipped
     ]
     print_mcnemar(rows)                              # must not raise
+
+
+def test_precedence_fixes_baseline_direction():
+    # v_s is always the baseline vs v_sg_pess, regardless of which has higher reach
+    vs = dict(method="mcts", value_mode="v_s", gate="none", cands=272, label="b16")
+    sgp = dict(method="mcts", value_mode="v_sg_pess", gate="none", cands=272,
+               label="b16-sgP")
+    assert _precedence(vs) < _precedence(sgp)          # v_s < v_sg_pess always
+    # mcss is the baseline vs any mcts
+    mcss = dict(method="mcss", value_mode="v_s", gate="none", cands=272, label="k272")
+    assert _precedence(mcss) < _precedence(vs)
+
+
+def _cell(env, seed, method, label, value_mode, succ):
+    return dict(env=env, seed=seed, method=method, label=label,
+                value_mode=value_mode, gate="none", cands=272,
+                reach=100 * sum(succ) / len(succ), err=0.0, n=len(succ), wall=0.0,
+                success=succ, goals=[[32.4, 24.8]] * len(succ), file=f"{label}.json")
+
+
+def test_pooled_mcnemar_direction_stable_across_flipping_seeds(capsys=None):
+    """The deciding case: v_sg ahead on seed 0, BEHIND on seed 1. The baseline
+    must stay v_s on BOTH (direction not data-dependent), so the pooled fixes/
+    breaks are computed against one consistent baseline (F1)."""
+    import io
+    from contextlib import redirect_stdout
+    # seed 0: v_sg fixes 4 of v_s's misses, breaks 1  → v_sg ahead
+    a0, b0 = _pairs(fixes=4, breaks=1)
+    # seed 1: v_sg fixes 1, breaks 4  → v_sg behind (the flip)
+    a1, b1 = _pairs(fixes=1, breaks=4)
+    rows = [
+        _cell("antmaze", 0, "mcts", "b16", "v_s", a0),
+        _cell("antmaze", 0, "mcts", "b16-sgP", "v_sg_pess", b0),
+        _cell("antmaze", 1, "mcts", "b16", "v_s", a1),
+        _cell("antmaze", 1, "mcts", "b16-sgP", "v_sg_pess", b1),
+    ]
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        print_mcnemar(rows)
+    out = buf.getvalue()
+    # both per-seed rows must read b16->b16-sgP (v_s baseline fixed), never reversed
+    assert "b16-sgP->b16" not in out
+    assert out.count("b16->b16-sgP") >= 3          # 2 per-seed + 1 pooled
+    # pooled fixes/breaks = sum in the canonical direction: fixes 4+1=5, breaks 1+4=5
+    pooled_f, pooled_b, _ = mcnemar_exact(a0 + a1, b0 + b1)
+    assert (pooled_f, pooled_b) == (5, 5)
+    assert "POOLED" in out
 
 
 if __name__ == "__main__":

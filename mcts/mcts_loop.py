@@ -37,10 +37,12 @@ from cleandiffuser.diffusion import ContinuousDiffusionSDE, DiscreteDiffusionSDE
 from cleandiffuser.nn_condition import IdentityCondition
 from cleandiffuser.nn_diffusion import DiT1d, DVInvMlp
 from cleandiffuser.utils import DVHorizonCritic
+import os
+
 from mcts.specs import (SPECS, TARGET_CFG, env_family, get_goal,  # noqa: F401
-                        make_dataset, max_episode_steps)
+                        make_dataset, max_episode_steps, normalize_goal_xy)
 from mcts.value_forest import ForestConfig, ValueForest
-from mcts.value_net import load_state_value
+from mcts.value_net import load_state_value, load_value_ensemble
 
 
 # ── Model loading ──────────────────────────────────────────────────────────────
@@ -48,7 +50,8 @@ from mcts.value_net import load_state_value
 def load_models(env_name: str, value_step: str = "latest",
                 planner_step: int = 1000000, critic_step: int = 1000000,
                 policy_step: int = 1000000, device: Optional[str] = None,
-                ckpt_dir: Optional[str] = None) -> Dict[str, Any]:
+                ckpt_dir: Optional[str] = None,
+                sg_ckpt: str = "state_value_sg_ckpt_best.pt") -> Dict[str, Any]:
     """Build + load planner, MCSS critic, V(s), and inverse-dynamics policy.
 
     NOTE on critic_step: the official DV inference config defaults to
@@ -86,7 +89,21 @@ def load_models(env_name: str, value_step: str = "latest",
                                       map_location=device, weights_only=False)["critic"])
     critic.eval()
 
-    value = load_state_value(f"{ckpt}/state_value_ckpt_{value_step}.pt", device=device)
+    # Plain V(s) — optional like the ensemble (F3): a V(s,g)-only run shouldn't
+    # require it. The Sampler enforces presence for value_mode=v_s.
+    value = None
+    v_path = f"{ckpt}/state_value_ckpt_{value_step}.pt"
+    if os.path.exists(v_path):
+        value = load_state_value(v_path, device=device)
+
+    # Goal-conditioned V(s, g) ensemble — loaded lazily (only present once trained);
+    # v_s runs don't need it, so a missing checkpoint is not fatal here.
+    value_sg = None
+    sg_path = f"{ckpt}/{sg_ckpt}"
+    if os.path.exists(sg_path):
+        value_sg = load_value_ensemble(sg_path, device=device)
+        print(f"  loaded V(s,g) ensemble: {sg_ckpt} "
+              f"(full_data={value_sg.meta.get('full_data')}, D={value_sg.meta.get('D')})")
 
     policy = DiscreteDiffusionSDE(
         DVInvMlp(obs_dim, act_dim, emb_dim=64, hidden_dim=256,
@@ -106,12 +123,13 @@ def load_models(env_name: str, value_step: str = "latest",
     print(f"[{env_name}] loaded planner+critic+V+policy on {device} "
           f"(obs_dim={obs_dim}, act_dim={act_dim}, H={H}, stride={stride}, "
           f"max_path_length={max_path_length})")
-    return dict(planner=planner, critic=critic, value=value, policy=policy,
-                normalizer=normalizer, obs_dim=obs_dim, act_dim=act_dim, H=H,
-                stride=stride, max_path_length=max_path_length,
+    return dict(planner=planner, critic=critic, value=value, value_sg=value_sg,
+                policy=policy, normalizer=normalizer, obs_dim=obs_dim,
+                act_dim=act_dim, H=H, stride=stride, max_path_length=max_path_length,
                 env_single=env_single, env_name=env_name, device=device, family=fam,
                 ckpt_dir=ckpt, value_step=value_step, planner_step=planner_step,
-                critic_step=critic_step, policy_step=policy_step)
+                critic_step=critic_step, policy_step=policy_step,
+                sg_ckpt=sg_ckpt if value_sg is not None else None)
 
 
 # ── Sampler (MCSS + MCTS share the policy & env loop) ──────────────────────────
@@ -121,7 +139,9 @@ class Sampler:
                  budget: int = 15, child_index: int = 1, c_ucb: float = 1.4142136,
                  plan_steps: int = 20, policy_steps: int = 10, planner_temp: float = 1.0,
                  policy_temp: float = 0.5, solver: str = "ddim",
-                 policy_solver: str = "ddpm", rebase: bool = True) -> None:
+                 policy_solver: str = "ddpm", rebase: bool = True,
+                 value_mode: str = "v_s", pess_beta: float = 1.0,
+                 stability_window: int = 3) -> None:
         self.m = models
         self.dev = models["device"]
         self.obs_dim = models["obs_dim"]
@@ -132,11 +152,82 @@ class Sampler:
         self.plan_steps, self.policy_steps = plan_steps, policy_steps
         self.planner_temp, self.policy_temp = planner_temp, policy_temp
         self.solver, self.policy_solver, self.rebase = solver, policy_solver, rebase
+        # Tree node value:
+        #   v_s        – goal-agnostic V(s)         (the measured baseline arm)
+        #   v_sg       – goal-conditioned mean over the ensemble
+        #   v_sg_pess  – goal-conditioned ensemble-min (pessimistic, the hardened value)
+        self.value_mode, self.pess_beta = value_mode, pess_beta
+        self.stability_window = stability_window   # near-term waypoints scored for stability
+        # cache the GaussianNormalizer mean/std as tensors so mcss_propose can UNNORMALIZE
+        # the planner's (normalized) trajectory before reading physical pose/velocity for the
+        # stability features — computing uprightness on standardized quat dims is meaningless.
+        nz = models["normalizer"]
+        self._norm_mean = (torch.as_tensor(np.asarray(nz.mean), dtype=torch.float32,
+                                           device=self.dev) if hasattr(nz, "mean") else None)
+        self._norm_std = (torch.as_tensor(np.asarray(nz.std), dtype=torch.float32,
+                                          device=self.dev) if hasattr(nz, "std") else None)
+        if value_mode not in ("v_s", "v_sg", "v_sg_pess", "oracle"):
+            raise ValueError(f"unknown value_mode {value_mode!r}")
+        if value_mode == "v_s" and models.get("value") is None:
+            raise ValueError("value_mode=v_s needs the V(s) checkpoint (none loaded)")
+        if value_mode in ("v_sg", "v_sg_pess") and models.get("value_sg") is None:
+            raise ValueError(f"value_mode={value_mode} needs a V(s,g) ensemble "
+                             f"checkpoint (none loaded — pass --sg-ckpt)")
+        # Per-step normalised goals (M, 2), set by mcts_waypoints; expand_fn reads
+        # them positionally (forest leaves stay in tree/env order every round).
+        self._cur_goals: Optional[torch.Tensor] = None
+        # value_mode="oracle" — DEV-ONLY (Rule-1): children scored by the TRUE BFS
+        # geodesic, set via set_oracle_ctx() by scripts/diag_oracle_tree.py. It tests
+        # whether STRUCTURED search with a perfect value beats the learned critic (the
+        # flat oracle re-rank already showed flat selection does not). It needs no
+        # learned value and must NEVER appear in a reportable run.
+        self._oracle_ctx: Optional[Dict[str, Any]] = None
         # Per-step forest stats from the latest mcts_waypoints call (one dict per tree:
         # n_nodes / max_depth / root_best_value); run_episodes aggregates realized depth.
         self.last_tree_stats: Optional[List[dict]] = None
         if not (1 <= child_index < self.H):
             raise ValueError(f"child_index must be in [1, H-1]={self.H-1}, got {child_index}")
+
+    def _child_values(self, child_states: torch.Tensor, B: int, K: int) -> torch.Tensor:
+        """(B*K, D) child states -> (B*K,) node values, per value_mode.
+
+        For goal-conditioned modes each env's goal (in tree/env order) is broadcast
+        over its K children and concatenated with the state, exactly as training fed
+        [state, goal_xy]; the goal was normalised once via normalize_goal_xy."""
+        if self.value_mode == "oracle":
+            return self._oracle_child_values(child_states, B, K)
+        if self.value_mode == "v_s":
+            return self.m["value"](child_states).squeeze(-1)
+        g = self._cur_goals.repeat_interleave(K, dim=0)          # (B*K, 2)
+        x = torch.cat([child_states, g], dim=-1)                 # (B*K, D+2)
+        ens = self.m["value_sg"]
+        if self.value_mode == "v_sg_pess":
+            return ens.pessimistic(x, mode="min").squeeze(-1)
+        return ens(x).mean(dim=-1)                               # v_sg: ensemble mean
+
+    def set_oracle_ctx(self, ctx: Optional[Dict[str, Any]]) -> None:
+        """DEV-ONLY (Rule-1): give the oracle value its per-episode context, in tree/env
+        order. ctx keys: normalizer, oracle (AntMazeOracle), goal_grids (list of M BFS
+        grids), scale (StepScale), spc (steps/cell). Set by scripts/diag_oracle_tree.py."""
+        self._oracle_ctx = ctx
+
+    def _oracle_child_values(self, child_states: torch.Tensor, B: int, K: int) -> torch.Tensor:
+        """DEV-ONLY (Rule-1): score children by the TRUE BFS geodesic to each env's goal,
+        mapped onto the SAME value scale as the learned critic so c_ucb is comparable.
+        child_states is (B*K, D) with the b-th block of K belonging to tree/env b, so
+        goal_grids[b] is the right grid; unreachable cells map to -1 via the scale clip."""
+        ctx = self._oracle_ctx
+        if ctx is None:
+            raise RuntimeError("value_mode='oracle' needs set_oracle_ctx() (dev-only)")
+        xy = ctx["normalizer"].unnormalize(
+            child_states.detach().cpu().numpy())[:, :2]          # (B*K, 2) world
+        grids, oracle = ctx["goal_grids"], ctx["oracle"]
+        geo = np.empty(B * K, dtype=np.float64)
+        for idx in range(B * K):
+            r, c = oracle.cell(xy[idx])
+            geo[idx] = grids[idx // K][r][c]                     # cells; inf if unreachable
+        vals = ctx["scale"].val_array(geo * ctx["spc"])         # -> [-1, 1] (inf -> -1)
+        return torch.as_tensor(np.asarray(vals, dtype=np.float32), device=self.dev)
 
     # one batched planner+value pass; the search's only GPU touch-point
     def expand_fn(self, states: List[np.ndarray]):
@@ -154,7 +245,7 @@ class Sampler:
             # child_index: the tree stitches in L-step segments, but we still execute exactly
             # one step per env-step (then replan). first_wp matters only for root children.
             first_wps = trajs[:, 1, :D]                         # (B*K, D)
-            vvals = self.m["value"](child_states).squeeze(-1)  # (B*K,)
+            vvals = self._child_values(child_states, B, K)      # (B*K,) per value_mode
         cs = child_states.cpu().numpy().reshape(B, K, D)
         fw = first_wps.cpu().numpy().reshape(B, K, D)
         vv = vvals.cpu().numpy().reshape(B, K)
@@ -162,8 +253,14 @@ class Sampler:
                  [fw[i, j] for j in range(K)],
                  [float(vv[i, j]) for j in range(K)]) for i in range(B)]
 
-    def mcts_waypoints(self, s_norm: np.ndarray) -> np.ndarray:
+    def mcts_waypoints(self, s_norm: np.ndarray,
+                       goals_norm: Optional[np.ndarray] = None) -> np.ndarray:
         M = s_norm.shape[0]
+        if self.value_mode in ("v_sg", "v_sg_pess"):
+            if goals_norm is None:
+                raise ValueError(f"value_mode={self.value_mode} needs per-env goals")
+            self._cur_goals = torch.as_tensor(goals_norm, dtype=torch.float32,
+                                              device=self.dev)   # (M, 2)
         forest = ValueForest([s_norm[i] for i in range(M)], self.expand_fn,
                              ForestConfig(k=self.k_mcts, budget=self.budget, c_ucb=self.c_ucb))
         forest.run()
@@ -190,6 +287,60 @@ class Sampler:
             wp = best[:, 1, :D].cpu().numpy()
         return wp
 
+    def mcss_propose(self, s_norm: np.ndarray) -> Dict[str, np.ndarray]:
+        """INSTRUMENTATION-ONLY: one planner.sample, return the FULL candidate pool.
+
+        Additive hook for the failure-instrumentation harness (mcts/instrument.py).
+        It does NOT alter mcss_waypoints (the production path) — it reproduces MCSS's
+        single planner call so the instrumented loop can, from ONE consistent draw,
+        (a) take the same DV-critic argmax decision MCSS would, (b) log every
+        candidate's value, and (c) let a Tier-2 oracle re-rank pick over the identical
+        candidates. Returned arrays (numpy, M = n_envs, K = k_mcss, D = obs_dim):
+            first_wps  (M, K, D)  candidate immediate next waypoints (executed if chosen)
+            endpoints  (M, K, D)  candidate plan endpoints (where each plan heads)
+            scores     (M, K)     DV trajectory-critic score per candidate
+
+        Note: argmax over `scores` here is byte-for-byte the same selection rule as
+        mcss_waypoints; the two differ only in that this returns the internals.
+        """
+        M, K, H, D = s_norm.shape[0], self.k_mcss, self.H, self.obs_dim
+        s = torch.as_tensor(s_norm, dtype=torch.float32, device=self.dev)
+        prior = torch.zeros((M * K, H, D), device=self.dev)
+        prior[:, 0, :] = s.repeat_interleave(K, dim=0)
+        with torch.no_grad():
+            trajs, _ = self.m["planner"].sample(
+                prior, solver=self.solver, n_samples=M * K, sample_steps=self.plan_steps,
+                use_ema=True, condition_cfg=None, w_cfg=1.0, temperature=self.planner_temp)
+            scores = self.m["critic"](trajs).squeeze(-1).view(M, K)
+            trajs = trajs.view(M, K, H, D)
+            first_wps = trajs[:, :, 1, :D]                       # (M, K, D)
+            endpoints = trajs[:, :, H - 1, :D]                   # (M, K, D)
+            # predicted near-term STABILITY features (DEPLOYABLE — straight from the
+            # planner's own trajectory, no privileged info). The Ant's ~20% failures are
+            # topples, so a stability-aware selector can prefer plans predicted to stay
+            # upright. MUST be read in RAW physical units: trajs is GaussianNormalizer-space,
+            # so uprightness on standardized quat dims is garbage — unnormalize first.
+            sd = self._norm_std
+            # first-step xy MOVE in raw units (mean cancels in the difference, scale by std)
+            disp = (((trajs[:, :, 1, :2] - trajs[:, :, 0, :2]) * sd[:2]).norm(dim=-1)
+                    if sd is not None else
+                    (trajs[:, :, 1, :2] - trajs[:, :, 0, :2]).norm(dim=-1))   # (M,K)
+            if D >= 21 and sd is not None:                       # antmaze (quat@3:7, angvel@18:21)
+                Ls = max(1, min(self.stability_window, H - 1))
+                seg = trajs[:, :, 1:1 + Ls, :] * sd + self._norm_mean    # (M,K,Ls,D) RAW state
+                up = 1.0 - 2.0 * (seg[..., 4] ** 2 + seg[..., 5] ** 2)   # true uprightness/waypoint
+                min_upright = up.min(dim=2).values              # (M,K) worst predicted uprightness
+                angvel = seg[..., 18:21].norm(dim=-1).mean(dim=2)        # (M,K) mean angular speed
+            else:                                               # maze2d point mass: no pose
+                min_upright = torch.ones((M, K), device=self.dev)
+                angvel = torch.zeros((M, K), device=self.dev)
+        return dict(first_wps=first_wps.cpu().numpy(),
+                    endpoints=endpoints.cpu().numpy(),
+                    scores=scores.cpu().numpy(),
+                    min_upright=min_upright.cpu().numpy(),       # (M,K) higher = predicted-stabler
+                    angvel=angvel.cpu().numpy(),                 # (M,K) lower = smoother
+                    disp=disp.cpu().numpy())                     # (M,K) lower = gentler first step
+
     def policy_action(self, s_norm: np.ndarray, next_wp: np.ndarray) -> np.ndarray:
         M = s_norm.shape[0]
         obs_r = torch.as_tensor(s_norm, dtype=torch.float32, device=self.dev).clone()
@@ -211,8 +362,21 @@ class Sampler:
 
 def run_episodes(sampler: Sampler, method: str, n_envs: int, n_episodes: int,
                  seed: int = 0, max_steps: Optional[int] = None,
-                 verbose: bool = True) -> Dict[str, Any]:
+                 verbose: bool = True, dv_log: bool = False) -> Dict[str, Any]:
     """Closed-loop evaluation; returns aggregates PLUS per-rollout vectors.
+
+    DV-compatible score (`dv_norm_mean ± dv_norm_err`, always computed; the per-step
+    `[t=N] rew:` lines printed when dv_log=True) replicates the base DV pipeline's
+    EXACT per-family accounting so the numbers are directly comparable to its logs:
+      * antmaze (veteran_d4rl_antmaze.py:445,449): ep_reward += rew, then
+        np.clip(ep_reward, 0, 1) -> a reach indicator -> get_normalized_score
+        gives 0 or 100, mean = reach% in [0, 100].
+      * maze2d (veteran_d4rl_maze2d.py:445,449): finished |= (rew==1); ep_reward +=
+        finished -> a latched camping count, NOT clipped -> get_normalized_score can
+        exceed 100/200 (the "201.4 norm" regime). The metric is camping return, not
+        a reach indicator.
+    The binary `success` vector below (for McNemar) is the active-masked reach
+    indicator either way; on antmaze it equals the DV reach% exactly.
 
     Per-rollout fields (episode-major order: [ep0_env0..ep0_envN, ep1_env0..]):
         success    1/0 — did the rollout ever touch the goal
@@ -272,30 +436,43 @@ def run_episodes(sampler: Sampler, method: str, n_envs: int, n_episodes: int,
               f"— check the goal vectors via scripts/collate_mcts.py before trusting "
               f"McNemar pairing.")
 
+    fam = env_family(env_name)
     all_success: List[np.ndarray] = []
     all_reach_step: List[np.ndarray] = []
     all_starts: List[np.ndarray] = []
     all_goals: List[List[Optional[List[float]]]] = []
+    all_dv: List[np.ndarray] = []                # DV-exact per-env score input
     depth_sum, depth_n, depth_max = 0.0, 0, 0   # realized tree depth (mcts only)
     t0 = time.perf_counter()
+    goal_conditioned = (method == "mcts" and sampler.value_mode != "v_s")
     for ep in range(n_episodes):
         obs = env.reset()
         all_starts.append(np.asarray(obs)[:, :2].astype(np.float64).copy())
+        goals_raw = None
         try:
-            all_goals.append([np.asarray(get_goal(e), dtype=np.float64).tolist()
-                              for e in env.envs])
+            goals_raw = np.asarray([get_goal(e) for e in env.envs], dtype=np.float64)
+            all_goals.append(goals_raw.tolist())
         except Exception as e:
             print(f"  [{method}] WARNING: could not read per-env goals ({e!r})")
             all_goals.append([None] * n_envs)
+            if goal_conditioned:
+                raise RuntimeError("value_mode needs per-env goals but none could "
+                                   "be read — abort rather than score blind") from e
+        # Goals are fixed per episode; normalise ONCE with the shared helper (C1)
+        # so the tree's V(s,g) call matches training exactly.
+        goals_norm = (normalize_goal_xy(normalizer, goals_raw)
+                      if goal_conditioned else None)
         ep_rew = np.zeros(n_envs, dtype=np.float64)
         reach_step = np.full(n_envs, -1, dtype=np.int64)   # first goal touch, -1 = never
         active = np.ones(n_envs, dtype=bool)   # still in the FIRST episode (count rewards)
+        dv_acc = np.zeros(n_envs, dtype=np.float64)        # DV-exact accumulator
+        dv_finished = np.zeros(n_envs, dtype=bool)         # maze2d latch
         for t in range(max_t):
             s_norm = normalizer.normalize(obs).astype(np.float32)   # (n_envs, obs_dim)
             if method == "mcss":
                 next_wp = sampler.mcss_waypoints(s_norm)
             else:
-                next_wp = sampler.mcts_waypoints(s_norm)
+                next_wp = sampler.mcts_waypoints(s_norm, goals_norm=goals_norm)
                 for st_t in (sampler.last_tree_stats or []):
                     depth_sum += st_t["max_depth"]
                     depth_n += 1
@@ -309,12 +486,21 @@ def run_episodes(sampler: Sampler, method: str, n_envs: int, n_episodes: int,
             hit = active & (rew > 0.0) & (reach_step < 0)
             reach_step[hit] = t
             ep_rew += rew * active
+            # DV-exact accumulator, per family (matches the base pipelines verbatim):
+            if fam == "maze2d":
+                dv_finished |= (rew == 1.0)               # latch at first goal touch
+                dv_acc += dv_finished                     # camping count (no clip)
+            else:
+                dv_acc += rew                             # antmaze raw (clipped at end)
             active &= ~np.asarray(done, dtype=bool)
-            if not active.any():
-                break
+            if dv_log:
+                print(f"[t={t+1}] rew: {dv_acc}")
+            if not active.any() and not dv_log:
+                break       # dv_log runs the full horizon so the per-step log matches DV
         succ = np.clip(ep_rew, 0.0, 1.0)
         all_success.append(succ)
         all_reach_step.append(reach_step)
+        all_dv.append(np.clip(dv_acc, 0.0, 1.0) if fam != "maze2d" else dv_acc)
         if verbose:
             print(f"  [{method}] ep {ep+1}/{n_episodes}  reach={succ.mean()*100:5.1f}%  "
                   f"elapsed={time.perf_counter()-t0:6.0f}s")
@@ -324,12 +510,23 @@ def run_episodes(sampler: Sampler, method: str, n_envs: int, n_episodes: int,
     flat_reach_step = np.concatenate(all_reach_step)
     norm = np.array([env_single.get_normalized_score(x) for x in flat]) * 100.0
     p = float(flat.mean())
+    # DV-exact score: get_normalized_score on the per-family accumulator (reach
+    # indicator for antmaze -> [0,100]; un-clipped camping return for maze2d ->
+    # can exceed 100/200). This is the number the base DV pipelines print.
+    flat_dv = np.concatenate(all_dv)
+    dv_norm = np.array([env_single.get_normalized_score(x) for x in flat_dv]) * 100.0
+    dv_norm_mean = float(dv_norm.mean())
+    dv_norm_err = float(dv_norm.std() / np.sqrt(flat_dv.size))
+    if dv_log:
+        print(f"{dv_norm_mean} {dv_norm_err}")     # the base DV pipeline's final line
     out = dict(method=method, n_rollouts=int(flat.size),
                reach_pct=float(p * 100.0),
                # binomial SEM of reach% — the honest error bar for a success rate
                reach_err=float(np.sqrt(p * (1.0 - p) / flat.size) * 100.0),
                norm_mean=float(norm.mean()),
                norm_err=float(norm.std() / np.sqrt(flat.size)),
+               # the base-DV-comparable score (== norm_mean on antmaze; camping on maze2d)
+               dv_norm_mean=dv_norm_mean, dv_norm_err=dv_norm_err,
                wall_s=round(time.perf_counter() - t0, 1),
                # per-rollout vectors, episode-major; (seed, index) is the pairing key
                success=[int(x > 0) for x in flat],

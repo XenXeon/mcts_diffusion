@@ -119,8 +119,16 @@ def get_goal(e: Any):
 
 
 def make_dataset(env_name: str, H: Optional[int] = None,
-                 stride: Optional[int] = None) -> Tuple[Any, Any]:
+                 stride: Optional[int] = None,
+                 learn_policy: bool = False) -> Tuple[Any, Any]:
     """Build (env, DV dataset) with the family geometry and the pipeline TARGET_CFG.
+
+    `learn_policy=False` (default) keeps only terminus-reaching trajectories — the
+    DV critic / V(s) regime. `learn_policy=True` ALSO keeps timeout trajectories
+    (~89% more data on antmaze-large-diverse), which carry valid relabeling triples
+    even though they never reach a goal — the full-data V(s,g) regime (plan v5.1).
+    Either way seq_obs uses the same GaussianNormalizer, so the goal scale is
+    identical across modes.
 
     Heavyweight imports (gym/d4rl/cleandiffuser) happen here, not at module import.
     """
@@ -137,5 +145,5 @@ def make_dataset(env_name: str, H: Optional[int] = None,
         from cleandiffuser.dataset.d4rl_maze2d_dataset import DV_D4RLMaze2DSeqDataset as DS
     else:
         from cleandiffuser.dataset.d4rl_antmaze_dataset import DV_D4RLAntmazeSeqDataset as DS
-    ds = DS(raw, horizon=H, stride=stride, learn_policy=False, **TARGET_CFG)
+    ds = DS(raw, horizon=H, stride=stride, learn_policy=learn_policy, **TARGET_CFG)
     return env, ds

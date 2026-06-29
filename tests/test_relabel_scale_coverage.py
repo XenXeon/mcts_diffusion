@@ -11,7 +11,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from mcts.coverage import TrajectoryCoverage
-from mcts.relabel import (draw_goal_index, make_sample,
+from mcts.relabel import (draw_goal_index, make_sample, path_end_indices,
                           terminus_indices_from_tml)
 from mcts.value_scale import StepScale
 
@@ -49,6 +49,45 @@ def test_terminus_from_tml_nested_and_flat():
     except ValueError:
         return
     raise AssertionError("expected ValueError for a path with no terminus")
+
+
+def test_path_end_indices_terminus_and_timeout():
+    # path 0: terminus at index 2 (tml==1), then repeat-padding (terminus state
+    #   repeated) — last-non-zero would be wrong, so tml must win.
+    # path 1: timeout, no tml==1, real states [0:3] then zero-padding — end = 2.
+    seq_tml = [[[0.0], [0.0], [1.0], [1.0], [1.0]],     # terminus path
+               [[0.0], [0.0], [0.0], [0.0], [0.0]]]     # timeout path
+    seq_obs = [[[1, 1], [1, 1], [9, 9], [9, 9], [9, 9]],   # repeat-pad of (9,9)
+               [[2, 2], [3, 3], [4, 4], [0, 0], [0, 0]]]   # zero-pad after idx 2
+    out = path_end_indices(seq_obs, seq_tml)
+    assert out == [(2, True), (2, False)]               # (end_index, is_terminus)
+    # terminus-only mode: matches terminus_indices_from_tml on a tml-complete set
+    tml_full = [[[0.0], [1.0], [0.0]], [[1.0], [0.0], [0.0]]]
+    obs_any = [[[1, 1], [2, 2], [2, 2]], [[5, 5], [5, 5], [5, 5]]]
+    ends = [e for e, _ in path_end_indices(obs_any, tml_full)]
+    assert ends == terminus_indices_from_tml(tml_full)
+
+
+def test_path_end_np_matches_py():
+    # The numpy branch is what SHIPS on the GPU box but the list fixtures only
+    # exercise the pure-Python branch (R-A). Assert the two are identical on the
+    # same fixtures; skips when numpy is absent (local box), runs on the GPU box.
+    try:
+        import numpy as np
+    except ImportError:
+        print("  (skip: numpy absent — numpy branch covered on the GPU box)")
+        return
+    from mcts.relabel import _path_end_indices_np
+    seq_tml = [[[0.0], [0.0], [1.0], [1.0], [1.0]],
+               [[0.0], [0.0], [0.0], [0.0], [0.0]],
+               [[1.0], [0.0], [0.0], [0.0], [0.0]]]            # terminus at 0
+    seq_obs = [[[1, 1], [1, 1], [9, 9], [9, 9], [9, 9]],
+               [[2, 2], [3, 3], [4, 4], [0, 0], [0, 0]],
+               [[5, 5], [5, 5], [5, 5], [5, 5], [5, 5]]]
+    py = path_end_indices(seq_obs, seq_tml)                    # list -> pure-Python
+    npr = _path_end_indices_np(np.asarray(seq_obs, dtype=float),
+                               np.asarray(seq_tml, dtype=float), 1e-8)
+    assert py == npr == [(2, True), (2, False), (0, True)]
 
 
 def test_mixture_proportions_and_bounds():

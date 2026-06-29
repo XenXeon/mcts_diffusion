@@ -162,6 +162,11 @@ def load_value_ensemble(path: str, device: str = "cpu") -> DVStateValueEnsemble:
         goal_conditioned=ckpt.get("goal_conditioned", False)).to(device)
     for m, sd in zip(net.members, ckpt["ensemble"]):
         m.load_state_dict(sd)
+    # Non-tensor training metadata (D, full_data, loss, geo_mean, ...) so the
+    # diagnostics can auto-match the critic's data regime and cross-check the
+    # value scale (audit D1-1/D1-2, R5.7a safety net).
+    net.meta = {k: v for k, v in ckpt.items()
+                if k not in ("ensemble", "members")}
     net.eval()
     return net
 

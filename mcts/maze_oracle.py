@@ -101,6 +101,88 @@ class AntMazeOracle:
         return "\n".join(" ".join(row) for row in grid)
 
 
+class Maze2DOracle:
+    """Geodesic oracle for D4RL maze2d (point mass), same interface as AntMazeOracle so the
+    diag_oracle_flat / animator tooling is family-agnostic. Reuses the VALIDATED transform from
+    scripts/phase6_stage0_oracle.py (BFSValue): wall = (maze_arr == 10) [d4rl WALL], and
+    xy->cell via the env's canonical `_xy_to_rowcol` if present, else (row=round(y), col=round(x))
+    — the maze2d coordinate frame is already ~cell-indexed. scaling=1, init=0 so the shared
+    animator formula col=(x+init_x)/scaling matches. ALWAYS eyeball ascii_map() on the box first
+    (the medium/large transforms were not re-validated after umaze). Rule-1 DIAGNOSTIC-ONLY."""
+
+    def __init__(self, env) -> None:
+        import numpy as np
+        u = env.unwrapped
+        arr = np.asarray(_get_attr(u, ("maze_arr", "_maze_arr"), "maze array"))
+        if arr.dtype.kind in "iuf":
+            wall = (arr == 10)                                   # d4rl WALL marker
+        else:
+            wall = np.isin(arr, np.array(["#", "x", "1", b"#"], dtype=arr.dtype))
+        self.wall: List[List[bool]] = [[bool(w) for w in row] for row in wall]
+        self.n_rows, self.n_cols = len(self.wall), len(self.wall[0])
+        self._xy_to_rc = getattr(u, "_xy_to_rowcol", None)
+        self.scaling, self.init_x, self.init_y = 1.0, 0.0, 0.0   # for the shared animator overlay
+        self._bfs_cache: Dict[Cell, List[List[float]]] = {}
+
+    def cell(self, xy) -> Cell:
+        if self._xy_to_rc is not None:
+            import numpy as np
+            rc = self._xy_to_rc(np.asarray(xy))
+            r, c = int(round(float(rc[0]))), int(round(float(rc[1])))
+        else:
+            # maze2d convention: row<-x, col<-y (OPPOSITE of antmaze's row<-y,col<-x).
+            # DEFINITIVE (maze2d-large, 8 resets): goal [7,9] -> cell (7,9) = the '12' marker
+            # at maze_arr[7][9], and all 8 start positions land on free cells this way, while
+            # row<-y,col<-x put 12/16 in walls. umaze/medium are diagonal so don't distinguish.
+            r, c = int(round(float(xy[0]))), int(round(float(xy[1])))   # row=x, col=y
+        return (min(max(r, 0), self.n_rows - 1), min(max(c, 0), self.n_cols - 1))
+
+    def xy(self, cell: Cell):
+        r, c = cell
+        return (float(r), float(c))                             # inverse of cell: x=row, y=col
+
+    # BFS geodesics (cell units) — identical to AntMazeOracle, kept standalone for safety.
+    def _bfs(self, src: Cell) -> List[List[float]]:
+        if src in self._bfs_cache:
+            return self._bfs_cache[src]
+        dist = [[math.inf] * self.n_cols for _ in range(self.n_rows)]
+        if not self.wall[src[0]][src[1]]:
+            dist[src[0]][src[1]] = 0.0
+            q = deque([src])
+            while q:
+                r, c = q.popleft()
+                for dr, dc in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                    nr, nc = r + dr, c + dc
+                    if (0 <= nr < self.n_rows and 0 <= nc < self.n_cols
+                            and not self.wall[nr][nc] and dist[nr][nc] == math.inf):
+                        dist[nr][nc] = dist[r][c] + 1.0
+                        q.append((nr, nc))
+        self._bfs_cache[src] = dist
+        return dist
+
+    def geodesic_cells(self, a_xy, b_xy) -> float:
+        return self._bfs(self.cell(a_xy))[self.cell(b_xy)[0]][self.cell(b_xy)[1]]
+
+    def dist_grid_from(self, xy) -> List[List[float]]:
+        return self._bfs(self.cell(xy))
+
+    def dmax_cells(self, from_xy) -> float:
+        grid = self._bfs(self.cell(from_xy))
+        return max(d for row in grid for d in row if math.isfinite(d))
+
+    def ascii_map(self, marks: Optional[Dict[str, Sequence[float]]] = None) -> str:
+        grid = [["#" if w else "." for w in row] for row in self.wall]
+        for ch, xy in (marks or {}).items():
+            r, c = self.cell(xy)
+            grid[r][c] = ch[0]
+        return "\n".join(" ".join(row) for row in grid)
+
+
+def make_oracle(env, family: str):
+    """Family-dispatched geodesic oracle (Rule-1 DIAGNOSTIC-ONLY)."""
+    return Maze2DOracle(env) if family == "maze2d" else AntMazeOracle(env)
+
+
 def calibrate_steps_per_cell(oracle: AntMazeOracle, path_xys, terminus,
                              max_pairs: int = 2000, min_cells: int = 3,
                              rng=None) -> float:

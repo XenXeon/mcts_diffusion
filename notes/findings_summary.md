@@ -1,7 +1,6 @@
 # MCTS-as-Sampler for Diffusion Veteran — Consolidated Findings (for a progression report)
 
-*Standalone summary of the whole DV/antmaze investigation, written so another agent (or a
-supervisor) can read it cold and produce a progress report. Numbers are the authoritative
+*Standalone summary of the whole DV/antmaze investigation. Numbers are the authoritative
 ones from `results/` as of 2026-06-28. Companion technical report with full methodology:
 [writeup_mcts_sampler.md](writeup_mcts_sampler.md). Privileged "oracle/orc/fs/gnt/smt"
 numbers are Rule-1 DIAGNOSTIC-ONLY ceiling probes — never citable as achievable results.*

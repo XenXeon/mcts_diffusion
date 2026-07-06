@@ -43,6 +43,7 @@ from mcts.specs import (SPECS, TARGET_CFG, env_family, get_goal,  # noqa: F401
                         make_dataset, max_episode_steps, normalize_goal_xy)
 from mcts.value_forest import ForestConfig, ValueForest
 from mcts.value_net import load_state_value, load_value_ensemble
+from mcts.window import build_inpaint_prior, compose_window, extend_prefix
 
 
 # ── Model loading ──────────────────────────────────────────────────────────────
@@ -51,7 +52,8 @@ def load_models(env_name: str, value_step: str = "latest",
                 planner_step: int = 1000000, critic_step: int = 1000000,
                 policy_step: int = 1000000, device: Optional[str] = None,
                 ckpt_dir: Optional[str] = None,
-                sg_ckpt: str = "state_value_sg_ckpt_best.pt") -> Dict[str, Any]:
+                sg_ckpt: str = "state_value_sg_ckpt_best.pt",
+                df_ckpt: Optional[str] = None) -> Dict[str, Any]:
     """Build + load planner, MCSS critic, V(s), and inverse-dynamics policy.
 
     NOTE on critic_step: the official DV inference config defaults to
@@ -120,10 +122,47 @@ def load_models(env_name: str, value_step: str = "latest",
     # 800 / antmaze 1000) — the family-level spec value is a fallback only.
     max_path_length = max_episode_steps(env_single, env_name)
 
+    # Consecutive-waypoint xy displacement sample (normalized units, stride-spaced,
+    # REAL steps only) — the reference distribution for the optional junction
+    # feasibility filter (Sampler(junction_filter=True)). None when the dataset
+    # class lacks the needed attributes (the filter then refuses to arm).
+    wp_disp_sample = None
+    try:
+        paths = getattr(ds, "paths", None)
+        seq_obs_np = np.asarray(ds.seq_obs) if hasattr(ds, "seq_obs") else None
+        if paths is not None and seq_obs_np is not None:
+            rng = np.random.default_rng(0)
+            chunks = []
+            for p in rng.permutation(len(paths))[:512]:
+                pl = paths[p][1] - paths[p][0] + 1
+                hi = min(pl - 1, seq_obs_np.shape[1] - 1) - stride
+                if hi <= 0:
+                    continue
+                t = rng.integers(0, hi + 1, size=min(256, hi + 1))
+                d = np.linalg.norm(seq_obs_np[p, t + stride, :2]
+                                   - seq_obs_np[p, t, :2], axis=-1)
+                chunks.append(d)
+            if chunks:
+                wp_disp_sample = np.concatenate(chunks).astype(np.float32)
+    except Exception as exc:              # diagnostic feature — never block loading
+        print(f"  (junction-filter reference sample unavailable: {exc!r})")
+
+    # Diffusion Forcing planner (mcts/df_model.py) — optional alternate backbone:
+    # trained by scripts/train_df_planner.py, loaded only when a run asks for it.
+    df_planner = None
+    if df_ckpt:
+        from mcts.df_model import DFPlanner
+        df_planner = DFPlanner.load(f"{ckpt}/df_planner_ckpt_{df_ckpt}.pt",
+                                    device=device)
+        print(f"  loaded DF planner: df_planner_ckpt_{df_ckpt}.pt "
+              f"(K={df_planner.K}, cfg={df_planner.cfg})")
+
     print(f"[{env_name}] loaded planner+critic+V+policy on {device} "
           f"(obs_dim={obs_dim}, act_dim={act_dim}, H={H}, stride={stride}, "
           f"max_path_length={max_path_length})")
     return dict(planner=planner, critic=critic, value=value, value_sg=value_sg,
+                df_planner=df_planner, df_ckpt=df_ckpt,
+                wp_disp_sample=wp_disp_sample,
                 policy=policy, normalizer=normalizer, obs_dim=obs_dim,
                 act_dim=act_dim, H=H, stride=stride, max_path_length=max_path_length,
                 env_single=env_single, env_name=env_name, device=device, family=fam,
@@ -141,13 +180,41 @@ class Sampler:
                  policy_temp: float = 0.5, solver: str = "ddim",
                  policy_solver: str = "ddpm", rebase: bool = True,
                  value_mode: str = "v_s", pess_beta: float = 1.0,
-                 stability_window: int = 3) -> None:
+                 stability_window: int = 3, k_root: Optional[int] = None,
+                 top_m: int = 1, junction_filter: bool = False,
+                 junction_pct: float = 99.0, expand_mode: str = "glue",
+                 backbone: str = "dv", df_slope: int = 1,
+                 df_row_stride: int = 1) -> None:
         self.m = models
         self.dev = models["device"]
         self.obs_dim = models["obs_dim"]
         self.act_dim = models["act_dim"]
         self.H = models["H"]
         self.k_mcss, self.k_mcts, self.budget = k_mcss, k_mcts, budget
+        # Root expansion width (default = k_mcts). The EXECUTED action is chosen among
+        # root children, so root width is what competes with MCSS's per-step pool of
+        # k_mcss candidates; deep rounds only refine the ranking of those children.
+        self.k_root = int(k_root) if k_root else k_mcts
+        self.top_m = int(top_m)   # backup = mean of the m best children (1 = MAX)
+        if self.k_root < 1 or self.top_m < 1:
+            raise ValueError(f"k_root and top_m must be >= 1, "
+                             f"got {self.k_root}, {self.top_m}")
+        # Junction feasibility filter: children whose FIRST continuation step is an
+        # implausibly large hop (xy displacement above the junction_pct percentile
+        # of the dataset's real stride-spaced steps) get a sentinel value far below
+        # the [-1, 1] value range (and below any UCB exploration bonus) — they lose
+        # every selection/backup but the search stays well-defined if a node's
+        # children are all filtered.
+        self._junction_thr: Optional[float] = None
+        self.last_junction_reject: Optional[float] = None
+        if junction_filter:
+            sample = models.get("wp_disp_sample")
+            if sample is None:
+                raise ValueError("junction_filter=True but the dataset offered no "
+                                 "displacement sample (see load_models)")
+            self._junction_thr = float(np.percentile(sample, junction_pct))
+            print(f"  junction filter armed: reject first-step xy hop > "
+                  f"{self._junction_thr:.4f} (p{junction_pct:g} of dataset steps)")
         self.child_index, self.c_ucb = child_index, c_ucb
         self.plan_steps, self.policy_steps = plan_steps, policy_steps
         self.planner_temp, self.policy_temp = planner_temp, policy_temp
@@ -156,6 +223,9 @@ class Sampler:
         #   v_s        – goal-agnostic V(s)         (the measured baseline arm)
         #   v_sg       – goal-conditioned mean over the ensemble
         #   v_sg_pess  – goal-conditioned ensemble-min (pessimistic, the hardened value)
+        #   critic     – DV trajectory critic on the COMPOSED window (search prefix +
+        #                continuation, mcts/window.py): same evaluator as MCSS, every
+        #                depth scored on the same [s0, s0+H) window -> comparable backups
         self.value_mode, self.pess_beta = value_mode, pess_beta
         self.stability_window = stability_window   # near-term waypoints scored for stability
         # cache the GaussianNormalizer mean/std as tensors so mcss_propose can UNNORMALIZE
@@ -166,13 +236,62 @@ class Sampler:
                                            device=self.dev) if hasattr(nz, "mean") else None)
         self._norm_std = (torch.as_tensor(np.asarray(nz.std), dtype=torch.float32,
                                           device=self.dev) if hasattr(nz, "std") else None)
-        if value_mode not in ("v_s", "v_sg", "v_sg_pess", "oracle"):
+        if value_mode not in ("v_s", "v_sg", "v_sg_pess", "oracle", "critic"):
             raise ValueError(f"unknown value_mode {value_mode!r}")
+        # Expansion mode (critic mode only):
+        #   glue    – continuations sampled from the leaf state alone, then
+        #             concatenated onto the search prefix (mcts/window.py). The
+        #             seam is off-manifold for the critic (measured 63,618x MSE
+        #             ratio on maze2d-large) — the winner's-curse fuel.
+        #   inpaint – Diffusion-Forcing-inspired: the prefix + node state are
+        #             CLAMPED into the denoiser at every diffusion step, so the
+        #             continuation is generated jointly consistent with the path
+        #             and the sampled window IS the composed window, seam-free.
+        self.expand_mode = expand_mode
+        if expand_mode not in ("glue", "inpaint"):
+            raise ValueError(f"unknown expand_mode {expand_mode!r}")
+        if expand_mode == "inpaint" and value_mode != "critic":
+            raise ValueError("expand_mode='inpaint' needs value_mode='critic' "
+                             "(it conditions on the search prefix, which only "
+                             "critic mode tracks)")
+        # inpaint clamps d+1 rows and must leave >=1 free row at the deepest
+        # expandable node — one row tighter than the glue/compose guard below
+        if expand_mode == "inpaint" and budget * child_index > self.H - 2:
+            raise ValueError(
+                f"expand_mode=inpaint: budget*child_index = {budget * child_index} "
+                f"> H-2 = {self.H - 2} — the deepest node's clamped prefix would "
+                f"leave no free rows to generate (build_inpaint_prior would raise "
+                f"mid-run)")
+        # Planner backbone:
+        #   dv – the frozen DV full-sequence planner (all established arms)
+        #   df – the Causal Diffusion Forcing planner (mcts/df_model.py): tree
+        #        expansion conditions on the search prefix NATIVELY (clean
+        #        history tokens are in-distribution by training), replacing
+        #        both the glue seam and the inpaint replacement hack. The DV
+        #        critic stays the evaluator, so DF arms compare like-for-like.
+        self.backbone = backbone
+        self.df_slope, self.df_row_stride = int(df_slope), int(df_row_stride)
+        if backbone not in ("dv", "df"):
+            raise ValueError(f"unknown backbone {backbone!r}")
+        if backbone == "df":
+            if models.get("df_planner") is None:
+                raise ValueError("backbone='df' needs a DF planner checkpoint "
+                                 "(load_models df_ckpt= / --df-ckpt)")
+            if budget * child_index > self.H - 2:
+                raise ValueError(
+                    f"backbone=df: budget*child_index = {budget * child_index} "
+                    f"> H-2 = {self.H - 2} — deepest history would leave no "
+                    f"free tokens to generate")
         if value_mode == "v_s" and models.get("value") is None:
             raise ValueError("value_mode=v_s needs the V(s) checkpoint (none loaded)")
         if value_mode in ("v_sg", "v_sg_pess") and models.get("value_sg") is None:
             raise ValueError(f"value_mode={value_mode} needs a V(s,g) ensemble "
                              f"checkpoint (none loaded — pass --sg-ckpt)")
+        if value_mode == "critic" and budget * child_index > self.H - 1:
+            raise ValueError(
+                f"value_mode=critic: budget*child_index = {budget * child_index} "
+                f"> H-1 = {self.H - 1} — the deepest node's prefix would fill the "
+                f"critic window with no continuation left (see mcts/window.py)")
         # Per-step normalised goals (M, 2), set by mcts_waypoints; expand_fn reads
         # them positionally (forest leaves stay in tree/env order every round).
         self._cur_goals: Optional[torch.Tensor] = None
@@ -230,25 +349,119 @@ class Sampler:
         return torch.as_tensor(np.asarray(vals, dtype=np.float32), device=self.dev)
 
     # one batched planner+value pass; the search's only GPU touch-point
-    def expand_fn(self, states: List[np.ndarray]):
-        K, H, D = self.k_mcts, self.H, self.obs_dim
+    def expand_fn(self, states: List[Any], k: Optional[int] = None):
+        K = int(k) if k else self.k_mcts     # k: per-call width (root may be wider)
+        H, D = self.H, self.obs_dim
         B = len(states)
-        s = torch.as_tensor(np.stack(states), dtype=torch.float32, device=self.dev)  # (B,D)
-        prior = torch.zeros((B * K, H, D), device=self.dev)
-        prior[:, 0, :] = s.repeat_interleave(K, dim=0)
+        critic_mode = self.value_mode == "critic"
+        # critic mode: node states are (state_vec, prefix) pairs — the prefix is the
+        # search-chosen waypoint path from the CURRENT REAL state s0 to this node, so
+        # children can be scored on the shared [s0, s0+H) window (mcts/window.py).
+        if critic_mode:
+            prefixes = [p for _, p in states]
+            s_np = np.stack([v for v, _ in states])
+        else:
+            prefixes = None
+            s_np = np.stack(states)
+        s = torch.as_tensor(s_np, dtype=torch.float32, device=self.dev)   # (B, D)
+        inpaint = critic_mode and self.expand_mode == "inpaint"
+        df = critic_mode and self.backbone == "df"
+        native = inpaint or df    # prefix lives INSIDE the sampled window
+        if native:
+            # Both native modes generate the whole [s0, s0+H) window in one shot,
+            # prefix included:
+            #   inpaint – DV planner, prefix CLAMPED via replacement conditioning
+            #             (approximate: the planner never trained on multi-row
+            #             clamping — measured -16 closed-loop, kept as ablation);
+            #   df      – Causal Diffusion Forcing planner: clean history tokens
+            #             are in-distribution by training -> EXACT conditioning.
+            prior_np, mask_np, d_lens = build_inpaint_prior(prefixes, s_np, H, K)
+            prior = torch.as_tensor(prior_np, device=self.dev)
+            # per-sample row offset of the node state inside its window
+            dt = torch.as_tensor(np.repeat(d_lens, K), device=self.dev)   # (B*K,)
+            ar = torch.arange(B * K, device=self.dev)
+            if inpaint:
+                inp_mask = torch.as_tensor(mask_np, device=self.dev)
+        else:
+            prior = torch.zeros((B * K, H, D), device=self.dev)
+            prior[:, 0, :] = s.repeat_interleave(K, dim=0)
         with torch.no_grad():
-            trajs, _ = self.m["planner"].sample(
-                prior, solver=self.solver, n_samples=B * K, sample_steps=self.plan_steps,
-                use_ema=True, condition_cfg=None, w_cfg=1.0, temperature=self.planner_temp)
-            child_states = trajs[:, self.child_index, :D]      # (B*K, D) tree child = L ahead
-            # Action target is ALWAYS the immediate next waypoint traj[1], regardless of
-            # child_index: the tree stitches in L-step segments, but we still execute exactly
-            # one step per env-step (then replan). first_wp matters only for root children.
-            first_wps = trajs[:, 1, :D]                         # (B*K, D)
-            vvals = self._child_values(child_states, B, K)      # (B*K,) per value_mode
+            planner = self.m["planner"]
+            if df:
+                hist_len = torch.as_tensor(np.repeat(d_lens + 1, K),
+                                           device=self.dev)
+                trajs = self.m["df_planner"].sample(
+                    prior, hist_len, H, slope=self.df_slope,
+                    row_stride=self.df_row_stride,
+                    temperature=self.planner_temp)
+            else:
+                if inpaint:
+                    base_mask = planner.fix_mask   # (1, H, D) row-0 mask; restore after
+                    planner.fix_mask = inp_mask
+                try:
+                    trajs, _ = planner.sample(
+                        prior, solver=self.solver, n_samples=B * K,
+                        sample_steps=self.plan_steps, use_ema=True, condition_cfg=None,
+                        w_cfg=1.0, temperature=self.planner_temp)
+                finally:
+                    if inpaint:
+                        planner.fix_mask = base_mask
+            if native:
+                # rows [0:d] replicate the prefix exactly (clamped), row d is the node
+                # state, so continuation indexing shifts by the per-node prefix length.
+                child_states = trajs[ar, dt + self.child_index, :D]       # (B*K, D)
+                first_wps = trajs[ar, dt + 1, :D]                         # (B*K, D)
+            else:
+                child_states = trajs[:, self.child_index, :D]  # (B*K, D) tree child = L ahead
+                # Action target is ALWAYS the immediate next waypoint traj[1], regardless of
+                # child_index: the tree stitches in L-step segments, but we still execute exactly
+                # one step per env-step (then replan). first_wp matters only for root children.
+                first_wps = trajs[:, 1, :D]                         # (B*K, D)
+            if native:
+                # the sampled window is already the composed window — score directly
+                vvals = self.m["critic"](trajs).squeeze(-1)
+                trj = trajs.view(B, K, H, D).cpu().numpy()
+            elif critic_mode:
+                # Score prefix + continuation on the shared window. A naive critic(trajs)
+                # would score each depth on its OWN later window, which systematically
+                # inflates expanded children on progress tasks (window-shift bias) —
+                # max-backup then rewards visits, not merit.
+                trj = trajs.view(B, K, H, D).cpu().numpy()
+                composed = np.concatenate(
+                    [compose_window(prefixes[i], trj[i]) for i in range(B)], axis=0)
+                vvals = self.m["critic"](torch.as_tensor(
+                    composed, dtype=torch.float32, device=self.dev)).squeeze(-1)
+            else:
+                vvals = self._child_values(child_states, B, K)  # (B*K,) per value_mode
+            if self._junction_thr is not None:
+                if native:
+                    disp = (trajs[ar, dt + 1, :2] - trajs[ar, dt, :2]).norm(dim=-1)
+                else:
+                    disp = (trajs[:, 1, :2] - trajs[:, 0, :2]).norm(dim=-1)   # (B*K,)
+                bad = disp > self._junction_thr
+                # -10 dominates value range [-1,1] PLUS the UCB exploration bonus
+                # (~<=2.4 at zero visits), so filtered children are never selected
+                # for expansion and never win top-m backups unless ALL siblings
+                # are filtered (search stays well-defined).
+                vvals = torch.where(bad, torch.full_like(vvals, -10.0), vvals)
+                self.last_junction_reject = float(bad.float().mean().item())
         cs = child_states.cpu().numpy().reshape(B, K, D)
         fw = first_wps.cpu().numpy().reshape(B, K, D)
         vv = vvals.cpu().numpy().reshape(B, K)
+        if native:
+            # child prefix = window rows [0 : d + child_index] — identical semantics
+            # to extend_prefix (rows [0:d] == parent prefix by clamping, row d ==
+            # node state), just sliced from the jointly-generated window.
+            return [([(cs[i, j],
+                       trj[i, j, : int(d_lens[i]) + self.child_index].copy())
+                      for j in range(K)],
+                     [fw[i, j] for j in range(K)],
+                     [float(vv[i, j]) for j in range(K)]) for i in range(B)]
+        if critic_mode:
+            return [([(cs[i, j], extend_prefix(prefixes[i], trj[i, j], self.child_index))
+                      for j in range(K)],
+                     [fw[i, j] for j in range(K)],
+                     [float(vv[i, j]) for j in range(K)]) for i in range(B)]
         return [([cs[i, j] for j in range(K)],
                  [fw[i, j] for j in range(K)],
                  [float(vv[i, j]) for j in range(K)]) for i in range(B)]
@@ -256,13 +469,31 @@ class Sampler:
     def mcts_waypoints(self, s_norm: np.ndarray,
                        goals_norm: Optional[np.ndarray] = None) -> np.ndarray:
         M = s_norm.shape[0]
+        if self.backbone == "df" and self.value_mode != "critic":
+            raise ValueError("backbone='df' tree search needs value_mode="
+                             "'critic' (prefix bookkeeping lives there)")
         if self.value_mode in ("v_sg", "v_sg_pess"):
             if goals_norm is None:
                 raise ValueError(f"value_mode={self.value_mode} needs per-env goals")
             self._cur_goals = torch.as_tensor(goals_norm, dtype=torch.float32,
                                               device=self.dev)   # (M, 2)
-        forest = ValueForest([s_norm[i] for i in range(M)], self.expand_fn,
-                             ForestConfig(k=self.k_mcts, budget=self.budget, c_ucb=self.c_ucb))
+        # critic mode packs (state, prefix) so expand_fn can compose windows; the
+        # forest treats states as opaque either way. Root prefix = None: the root's
+        # window starts at the real state itself.
+        roots = ([(s_norm[i], None) for i in range(M)] if self.value_mode == "critic"
+                 else [s_norm[i] for i in range(M)])
+        # The FIRST expand call is the root round (ValueForest.__init__ batches all M
+        # roots into it); widen it to k_root, deep rounds use k_mcts.
+        call = {"root": True}
+
+        def expand(states):
+            k = self.k_root if call["root"] else None
+            call["root"] = False
+            return self.expand_fn(states, k=k)
+
+        forest = ValueForest(roots, expand,
+                             ForestConfig(k=self.k_mcts, budget=self.budget,
+                                          c_ucb=self.c_ucb, top_m=self.top_m))
         forest.run()
         # Realized look-ahead: with child_index=L, a depth-d tree has seen d*L waypoints
         # (= d*L*stride dense steps) before committing. Logged so the depth the UCB
@@ -277,9 +508,17 @@ class Sampler:
         prior = torch.zeros((M * K, H, D), device=self.dev)
         prior[:, 0, :] = s.repeat_interleave(K, dim=0)
         with torch.no_grad():
-            trajs, _ = self.m["planner"].sample(
-                prior, solver=self.solver, n_samples=M * K, sample_steps=self.plan_steps,
-                use_ema=True, condition_cfg=None, w_cfg=1.0, temperature=self.planner_temp)
+            if self.backbone == "df":
+                # DF-MCSS: same sample-and-rank loop, DF backbone, DV critic —
+                # calibrates DF plan quality against every DV arm.
+                trajs = self.m["df_planner"].sample(
+                    prior, torch.ones(M * K, dtype=torch.long, device=self.dev),
+                    H, slope=self.df_slope, row_stride=self.df_row_stride,
+                    temperature=self.planner_temp)
+            else:
+                trajs, _ = self.m["planner"].sample(
+                    prior, solver=self.solver, n_samples=M * K, sample_steps=self.plan_steps,
+                    use_ema=True, condition_cfg=None, w_cfg=1.0, temperature=self.planner_temp)
             scores = self.m["critic"](trajs).squeeze(-1).view(M, K)
             idx = scores.argmax(dim=1)
             trajs = trajs.view(M, K, H, D)
@@ -362,7 +601,8 @@ class Sampler:
 
 def run_episodes(sampler: Sampler, method: str, n_envs: int, n_episodes: int,
                  seed: int = 0, max_steps: Optional[int] = None,
-                 verbose: bool = True, dv_log: bool = False) -> Dict[str, Any]:
+                 verbose: bool = True, dv_log: bool = False,
+                 trace: bool = False) -> Dict[str, Any]:
     """Closed-loop evaluation; returns aggregates PLUS per-rollout vectors.
 
     DV-compatible score (`dv_norm_mean ± dv_norm_err`, always computed; the per-step
@@ -442,9 +682,10 @@ def run_episodes(sampler: Sampler, method: str, n_envs: int, n_episodes: int,
     all_starts: List[np.ndarray] = []
     all_goals: List[List[Optional[List[float]]]] = []
     all_dv: List[np.ndarray] = []                # DV-exact per-env score input
+    traj_xy: List[np.ndarray] = []               # trace=True: per-step executed xy (T,n_envs,2)
     depth_sum, depth_n, depth_max = 0.0, 0, 0   # realized tree depth (mcts only)
     t0 = time.perf_counter()
-    goal_conditioned = (method == "mcts" and sampler.value_mode != "v_s")
+    goal_conditioned = (method == "mcts" and sampler.value_mode in ("v_sg", "v_sg_pess"))
     for ep in range(n_episodes):
         obs = env.reset()
         all_starts.append(np.asarray(obs)[:, :2].astype(np.float64).copy())
@@ -468,6 +709,10 @@ def run_episodes(sampler: Sampler, method: str, n_envs: int, n_episodes: int,
         dv_acc = np.zeros(n_envs, dtype=np.float64)        # DV-exact accumulator
         dv_finished = np.zeros(n_envs, dtype=bool)         # maze2d latch
         for t in range(max_t):
+            if trace:                              # executed path: pre-step xy, NaN once done
+                xy_rec = np.asarray(obs)[:, :2].astype(np.float32).copy()
+                xy_rec[~active] = np.nan
+                traj_xy.append(xy_rec)
             s_norm = normalizer.normalize(obs).astype(np.float32)   # (n_envs, obs_dim)
             if method == "mcss":
                 next_wp = sampler.mcss_waypoints(s_norm)
@@ -495,8 +740,8 @@ def run_episodes(sampler: Sampler, method: str, n_envs: int, n_episodes: int,
             active &= ~np.asarray(done, dtype=bool)
             if dv_log:
                 print(f"[t={t+1}] rew: {dv_acc}")
-            if not active.any() and not dv_log:
-                break       # dv_log runs the full horizon so the per-step log matches DV
+            if not active.any() and not dv_log and not trace:
+                break       # dv_log/trace run the full horizon so the per-step log is complete
         succ = np.clip(ep_rew, 0.0, 1.0)
         all_success.append(succ)
         all_reach_step.append(reach_step)
@@ -530,6 +775,9 @@ def run_episodes(sampler: Sampler, method: str, n_envs: int, n_episodes: int,
                wall_s=round(time.perf_counter() - t0, 1),
                # per-rollout vectors, episode-major; (seed, index) is the pairing key
                success=[int(x > 0) for x in flat],
+               # per-rollout DV-exact normalized score — the metric to PAIR on for maze2d
+               # (camping return, >100), where the binary `success` above is saturated.
+               dv_norm=[float(x) for x in dv_norm],
                reach_step=[int(s) if s >= 0 else None for s in flat_reach_step],
                starts=[xy.tolist() for ep_s in all_starts for xy in ep_s],
                goals=[g for ep_g in all_goals for g in ep_g],
@@ -537,6 +785,8 @@ def run_episodes(sampler: Sampler, method: str, n_envs: int, n_episodes: int,
                # all env-steps; look-ahead distance = depth × child_index × stride
                tree_depth_mean=round(depth_sum / depth_n, 2) if depth_n else None,
                tree_depth_max=int(depth_max) if depth_n else None)
+    if trace and traj_xy:
+        out["trace_xy"] = np.stack(traj_xy)        # (T, n_envs, 2); use with n_episodes=1
     if verbose:
         depth_str = (f"  tree_depth={out['tree_depth_mean']:.1f} (max {out['tree_depth_max']})"
                      if out["tree_depth_mean"] is not None else "")

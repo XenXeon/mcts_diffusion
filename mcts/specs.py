@@ -28,8 +28,12 @@ from typing import Any, Dict, Optional, Tuple
 
 
 def env_family(env_name: str) -> str:
-    """'maze2d' or 'antmaze' — the two trained DV checkpoint families."""
-    return "maze2d" if env_name.startswith("maze2d") else "antmaze"
+    """'maze2d', 'antmaze', or 'kitchen' — the trained DV checkpoint families."""
+    if env_name.startswith("maze2d"):
+        return "maze2d"
+    if env_name.startswith("kitchen"):
+        return "kitchen"
+    return "antmaze"
 
 
 # Per-family geometry + checkpoint roots (matches the training pipelines).
@@ -45,6 +49,14 @@ SPECS: Dict[str, Dict[str, Any]] = {
         H=40, stride=25, planner_depth=8, max_path_length=1000,
         ckpt=("results/veteran_d4rl_antmaze_H40_Jump25_next1_MCSS_transformer"
               "_d8_width256_separate_dp1")),
+    # kitchen: long-horizon SEQUENTIAL manipulation (complete 4 subtasks), NO locomotion.
+    # Value target = normalised DISCOUNTED return of subtask completions (a CLEAN signal,
+    # unlike nav's noisy behaviour-time) -> V(s) should correlate well here. discount=0.997
+    # matches configs/veteran/kitchen/kitchen.yaml (nav uses 1.0).
+    "kitchen": dict(
+        H=32, stride=4, planner_depth=2, max_path_length=280, discount=0.997,
+        ckpt=("results/veteran_d4rl_kitchen_H32_Jump4_next1_MCSS_transformer"
+              "_d2_width256_separate_dp1")),
 }
 
 # Dataset value-target config — MUST match the training pipeline
@@ -141,6 +153,13 @@ def make_dataset(env_name: str, H: Optional[int] = None,
     stride = stride or spec["stride"]
     env = gym.make(env_name)
     raw = env.get_dataset()
+    if fam == "kitchen":
+        # Different dataset signature: discounted MC return of subtask completions, NO
+        # learn_policy / reward_tune / continous_reward_at_done (those are the nav target).
+        from cleandiffuser.dataset.d4rl_kitchen_dataset import DV_D4RLKitchenSeqDataset as DS
+        ds = DS(raw, horizon=H, stride=stride, discount=spec.get("discount", 0.997),
+                center_mapping=True)
+        return env, ds
     if fam == "maze2d":
         from cleandiffuser.dataset.d4rl_maze2d_dataset import DV_D4RLMaze2DSeqDataset as DS
     else:

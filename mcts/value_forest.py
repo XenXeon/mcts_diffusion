@@ -87,8 +87,14 @@ def select_leaf(root: SearchNode, c: float) -> SearchNode:
     return node
 
 
-def backprop(node: SearchNode) -> None:
-    """Walk to the root: bump visit counts and recompute value = max(child.value).
+def backprop(node: SearchNode, top_m: int = 1) -> None:
+    """Walk to the root: bump visit counts and recompute value = mean of the top_m
+    child values (top_m=1 is the classic MAX backup).
+
+    top_m > 1 tempers the winner's curse: a max over K NOISY child values (e.g.
+    critic scores of stitched composite plans) systematically selects the most
+    OVERRATED child, so backed-up values inflate with every level. Averaging the
+    best m keeps the best-first semantics while shrinking that optimism bias.
 
     Call AFTER attaching the node's new children. Bottom-up order guarantees each node's
     children are already current when it is recomputed.
@@ -97,7 +103,9 @@ def backprop(node: SearchNode) -> None:
     while cur is not None:
         cur.visit += 1
         if cur.children:
-            cur.value = max(ch.value for ch in cur.children)
+            vals = sorted((ch.value for ch in cur.children), reverse=True)
+            m = min(top_m, len(vals))
+            cur.value = sum(vals[:m]) / m
         cur = cur.parent
 
 
@@ -106,6 +114,7 @@ class ForestConfig:
     k: int                    # candidate continuations per expansion
     budget: int               # expansion rounds AFTER the root expansion (per tree)
     c_ucb: float = 1.4142136  # UCB exploration constant (sqrt 2)
+    top_m: int = 1            # backup = mean of the m best children (1 = MAX backup)
 
 
 class ValueForest:
@@ -124,6 +133,8 @@ class ValueForest:
                  config: ForestConfig) -> None:
         if config.k < 1:
             raise ValueError(f"k must be >= 1, got {config.k}")
+        if config.top_m < 1:
+            raise ValueError(f"top_m must be >= 1, got {config.top_m}")
         self.expand_fn = expand_fn
         self.cfg = config
         # Root v_prior is irrelevant (root value never competes), so 0.0. first_wp None.
@@ -140,7 +151,7 @@ class ValueForest:
             for cs, fw, v in zip(child_states, first_wps, vvals):
                 node.children.append(
                     SearchNode(cs, fw, v, parent=node, depth=node.depth + 1))
-            backprop(node)   # recomputes value = max(child.value) up to the root
+            backprop(node, self.cfg.top_m)   # value = mean(top-m children) up to root
 
     def run(self) -> None:
         """Grow every tree by `budget` more expansions, one promising leaf per tree/round."""

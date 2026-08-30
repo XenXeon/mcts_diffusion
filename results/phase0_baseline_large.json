@@ -1,0 +1,67 @@
+[
+  {
+    "method": "DV-MCSS",
+    "env": "maze2d-large-v1",
+    "seed": 0,
+    "normalized_score": 111.23,
+    "raw_return": 304.0,
+    "goal_step": 496,
+    "episode_length": 800,
+    "denoising_calls": 24000,
+    "wall_seconds": 92.67,
+    "ms_per_step": 115.8,
+    "git_commit": "eb43c2ce552062f59e7dcc1d7b3490e29fe203b0"
+  },
+  {
+    "method": "DV-MCSS",
+    "env": "maze2d-large-v1",
+    "seed": 1,
+    "normalized_score": 211.12,
+    "raw_return": 571.0,
+    "goal_step": 229,
+    "episode_length": 800,
+    "denoising_calls": 24000,
+    "wall_seconds": 93.65,
+    "ms_per_step": 117.1,
+    "git_commit": "eb43c2ce552062f59e7dcc1d7b3490e29fe203b0"
+  },
+  {
+    "method": "DV-MCSS",
+    "env": "maze2d-large-v1",
+    "seed": 2,
+    "normalized_score": 112.72,
+    "raw_return": 308.0,
+    "goal_step": 492,
+    "episode_length": 800,
+    "denoising_calls": 24000,
+    "wall_seconds": 86.29,
+    "ms_per_step": 107.9,
+    "git_commit": "eb43c2ce552062f59e7dcc1d7b3490e29fe203b0"
+  },
+  {
+    "method": "DV-MCSS",
+    "env": "maze2d-large-v1",
+    "seed": 3,
+    "normalized_score": 276.59,
+    "raw_return": 746.0,
+    "goal_step": 54,
+    "episode_length": 800,
+    "denoising_calls": 24000,
+    "wall_seconds": 89.05,
+    "ms_per_step": 111.3,
+    "git_commit": "eb43c2ce552062f59e7dcc1d7b3490e29fe203b0"
+  },
+  {
+    "method": "DV-MCSS",
+    "env": "maze2d-large-v1",
+    "seed": 4,
+    "normalized_score": 245.54,
+    "raw_return": 663.0,
+    "goal_step": 137,
+    "episode_length": 800,
+    "denoising_calls": 24000,
+    "wall_seconds": 88.0,
+    "ms_per_step": 110.0,
+    "git_commit": "eb43c2ce552062f59e7dcc1d7b3490e29fe203b0"
+  }
+]

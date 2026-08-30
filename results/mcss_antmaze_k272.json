@@ -1,0 +1,24 @@
+{
+  "env": "antmaze-large-diverse-v2",
+  "seed": 0,
+  "n_envs": 25,
+  "n_episodes": 1,
+  "max_steps": null,
+  "budget": 15,
+  "k_mcts": 16,
+  "k_mcss": 272,
+  "child_index": 1,
+  "c_ucb": 1.4142136,
+  "value_step": "latest",
+  "timestamp": "2026-06-10 10:48:28",
+  "results": {
+    "mcss": {
+      "method": "mcss",
+      "n_rollouts": 25,
+      "reach_pct": 84.0,
+      "norm_mean": 84.0,
+      "norm_err": 7.332121111929344,
+      "wall_s": 5895.8
+    }
+  }
+}

@@ -154,7 +154,20 @@ class DV_D4RLMaze2DSeqDataset(BaseDataset):
         self.seq_obs = np.array(self.seq_obs)
         self.seq_act = np.array(self.seq_act)
         self.seq_rew = np.array(self.seq_rew)
-        
+
+        # Terminus mask for V(s, g) relabeling (mcts/relabel.py). In the
+        # learn_policy=False mode the value/planner datasets use, every maze2d
+        # path is segmented to END at a goal-reach (rewards==1), stored at index
+        # path_length-1 and repeat-padded afterwards — so maze2d has a genuine
+        # spatial terminus (obs[:, :2] = xy); it was simply never exposed, which
+        # blocked --goal-conditioned. Marking [path_length-1:] = 1 (path_length =
+        # pe-ps+1) mirrors the antmaze dataset's seq_tml, making maze2d a
+        # first-class goal-conditioned env.
+        T = self.seq_obs.shape[1]
+        self.seq_tml = np.zeros((len(self.paths), T, 1), dtype=np.float32)
+        for _i, (_ps, _pe) in enumerate(self.paths):
+            self.seq_tml[_i, _pe - _ps:] = 1.0    # first tml==1 at path_length-1
+
         if reward_tune == "iql":
             self.seq_rew += -1 
         elif reward_tune == "none":

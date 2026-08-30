@@ -13,6 +13,13 @@ RUN pip install --no-cache-dir "cython==0.29.37" \
     && git clone --depth 1 https://github.com/Farama-Foundation/D4RL.git /tmp/d4rl \
     && pip install --no-cache-dir -e /tmp/d4rl
 
+# Pre-compile mujoco_py during image build so runtime containers never need to
+# recompile it from scratch.  gcc-11 has a known ICE (segfault) compiling the
+# large cymj.c file with -O2 + -fopenmp; OPT overrides the Python distutils
+# default so the build succeeds with -O1.
+ENV OPT="-O1 -DNDEBUG"
+RUN python -c "import mujoco_py; print('mujoco_py compiled OK')"
+
 # Copy source and install cleandiffuser as editable
 # At runtime the mount overwrites /workspace, but the .pth file still
 # points to /workspace so editable install works with the live mounted code.

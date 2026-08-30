@@ -1,292 +1,347 @@
-<!-- Improved compatibility of back to top link: See: https://github.com/othneildrew/Best-README-Template/pull/73 -->
 <a name="readme-top"></a>
-<!--
-*** Thanks for checking out the Best-README-Template. If you have a suggestion
-*** that would make this better, please fork the repo and create a pull request
-*** or simply open an issue with the tag "enhancement".
-*** Don't forget to give the project a star!
-*** Thanks again! Now go create something AMAZING! :D
--->
 
-<p align="center">
-    <br>
-    <img src="assets/github_logo.jpg" width="300"/>
-    <br>
-<p>
+# Integrating Monte Carlo Tree Search into Offline Diffusion Planners
 
-# CleanDiffuser: An Easy-to-use Modularized Library for Diffusion Models in Decision Making
+An experimental study of **when a structured tree search helps a state-of-the-art
+diffusion planner** for offline reinforcement learning, built on top of
+[CleanDiffuser](https://github.com/CleanDiffuserTeam/CleanDiffuser) and its
+Diffusion Veteran (DV) planner. All experiments run on the
+[D4RL](https://github.com/Farama-Foundation/D4RL) benchmarks (maze2d, antmaze,
+FrankaKitchen).
 
-<p align="center">
-·
-<a href="https://arxiv.org/abs/2406.09509">ArXiv</a>
-·
-<a href="assets/CleanDiffuser.pdf">Paper</a>
-·
-<a href="https://cleandiffuserteam.github.io/CleanDiffuserDocs/">Documentation</a>
-·
-</p>
+---
 
-> Hi there! We have re-implemented **CleanDiffuser** in **PyTorch Lightning** style! With Lightning, you can easily leverage advanced deep learning techniques such as **mixed precision, multi-GPU/multi-node training**, and more. These updates are now available in the **`lightning` branch**. Additionally, this branch features **simplified and more readable algorithm implementations**, **pretrained models (including inverse dynamics and IQL)** to facilitate algorithm development, and **broader environment support**. We highly recommend switching to the **`lightning` branch**, as it will soon replace the **`main` branch**, which will then be archived as legacy. 🚀
+## Overview
 
+The base system (DV) draws a fixed number of candidate trajectories, ranks the
+whole trajectory with a learned critic, executes the first step, and repeats —
+a flat best-of-K rule called **Monte Carlo Sampling with Selection (MCSS)**.
+This project asks whether replacing that flat selection with a **Monte Carlo
+Tree Search** over trajectories (or over the denoising process) does better,
+and under what conditions.
 
-**CleanDiffuser** is an easy-to-use modularized Diffusion Model library tailored for decision-making, which comprehensively integrates different types of diffusion algorithmic branches. CleanDiffuser offers a variety of advanced *diffusion models*, *network structures*, diverse *conditions*, and *algorithm pipelines* in a simple and user-friendly manner. Inheriting the design philosophy of [CleanRL](https://github.com/vwxyzjn/cleanrl) and [Diffusers](https://github.com/huggingface/diffusers), CleanDiffuser emphasizes **usability, simplicity, and customizability**. We hope that CleanDiffuser will serve as a foundational tool library, providing long-term support for Diffusion Model research in the decision-making community, facilitating the application of research for scientists and practitioners alike. The highlight features of CleanDiffuser are:
+Everything is added on top of a **frozen** copy of DV — the same inverse-dynamics
+policy is shared across every arm, and the planner and critic are the only
+experimental factors, so each comparison isolates one variable. The code
+contributed by this work lives in **`mcts/`** (tree search, node value
+functions, the causal Diffusion-Forcing and shortcut planners, the per-token
+noise-aware guidance model, and a faithful port of Monte Carlo Tree Diffusion)
+and **`scripts/`** (experiment drivers, training, analysis, figures).
 
-- 🚀 Amazing features specially tailored for decision-making tasks
-- 🍧 Support for multiple advanced diffusion models and network architectures 
-- 🧩 Build decoupled modules into integrated pipelines easily like building blocks
-- 📈 Wandb logging and Hydra configuration 
-- 🌏 Unified environmental interface and efficient dataloader
+Two entry points run every experiment:
 
-We strongly recommend reading [papers](https://arxiv.org/abs/2406.09509) and [documents](https://cleandiffuserteam.github.io/CleanDiffuserDocs/) to learn more about CleanDiffuser and its design philosophy.
+| Script | Execution model | Used for |
+|---|---|---|
+| `scripts/run_mcts_compare.py` | per-step MPC (Setup 1) | flat MCSS vs the **trajectory-axis** tree; all node-value, backbone, and guidance experiments (dissertation Chapters 4–5) |
+| `scripts/run_mctd.py` | periodic-replan MPC (Setup 2) | the **denoising-axis** search (MCTD) and its controls; cadence and target-selection controls (Chapter 6) |
 
-<p align="center">
-    <br>
-    <img src="assets/framework.png" width="700"/>
-    <br>
-<p>
+Each run writes a self-describing **result JSON** (full config, git commit,
+per-rollout scores, and the start/goal arrays) so any comparison can be
+re-paired and re-checked after the fact.
 
-<!-- NEWS -->
-## 🔥 News and Change Log
-- [**2025-02-15**] 🥳 We have added a diffusion planner based on empirical studies using CleanDiffuser, [Diffusion Veteran](https://openreview.net/forum?id=7BQkXXM8Fy).
-- [**2024-09-26**] 🎁 Our paper [CleanDiffuser](https://arxiv.org/abs/2406.09509), has been accepted by **NeurIPS 2024 Datasets and Benchmark Track**!
-- [**2024-08-27**] 🥳 We have added a lightning-fast diffusion planner, [DiffuserLite](https://arxiv.org/pdf/2401.15443), and two popular diffusion policies, [SfBC](https://arxiv.org/abs/2209.14548) and [QGPO](https://arxiv.org/abs/2304.12824), to the pipeline. Additionally, we have updated some unit tests and [API documentation](https://cleandiffuserteam.github.io/CleanDiffuserDocs/).
-- [**2024-07-03**] 💫 We provided a CleanDiffuser-based replication of ACT ([action chunking with transformers](https://arxiv.org/abs/2304.13705)) in the [act branch](https://github.com/CleanDiffuserTeam/CleanDiffuser/tree/act).
-- [**2024-06-24**] 🥰 We have added Consistency Models into CleanDifuser. With one model, you can do both Consistency Distillation and Consistency Training! Check out an example in `tutorials/sp_consistency_policy.py` ! (Note: Our consistency training implementation refers to the improved version, see https://arxiv.org/abs/2310.14189.)
-- [**2024-06-17**] 🔥 We released arxiv version of [**CleanDiffuser: An Easy-to-use Modularized Library for Diffusion Models in Decision Making**](https://arxiv.org/abs/2406.09509). 
+---
 
-<!-- GETTING STARTED -->
-## 🛠️ Getting Started
+## Getting Started
 
-#### 1. Create and activate conda environment
-```bash
-$ conda create -n cleandiffuser python==3.9
-$ conda activate cleandiffuser
-```
-#### 2. Install PyTorch
-Install `torch>1.0.0,<2.3.0` that is compatible with your CUDA version. For example, `PyTorch 2.2.2` with `CUDA 12.1`:
-```bash
-$ conda install pytorch==2.2.2 torchvision==0.17.2 pytorch-cuda=12.1 -c pytorch -c nvidia
-```
-#### 3. Install CleanDiffuser from source
-```bash
-$ git clone https://github.com/CleanDiffuserTeam/CleanDiffuser.git
-$ cd CleanDiffuser
-$ pip install -e .
-```
-#### 4. Additional installations
-For users who need to run `pipelines` and reproduce the results of the paper, they will need to install RL simulators.
+The environment is a Docker image (CUDA + PyTorch nightly + D4RL/mujoco-py,
+pre-compiled). You need an **NVIDIA GPU**, **Docker**, and the
+**[NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)**
+(so `--gpus all` works).
 
-First, install the dependencies related to the mujoco-py environment. For more details, see https://github.com/openai/mujoco-py#install-mujoco
+### 1. Build the images
 
 ```bash
-$ sudo apt-get install libosmesa6-dev libgl1-mesa-glx libglfw3 libglew-dev patchelf
-```
-```bash
-# Install D4RL from source (recommended)
-$ cd <PATH_TO_D4RL_INSTALL_DIR>
-$ git clone https://github.com/Farama-Foundation/D4RL.git
-$ cd D4RL
-$ pip install -e .
-# Install Robomimic from source (recommended)
-$ cd <PATH_TO_ROBOMIMIC_INSTALL_DIR>
-$ git clone https://github.com/ARISE-Initiative/robomimic.git
-$ cd robomimic
-$ pip install -e .
-$ cd <PATH_TO_ROBOSUITE_INSTALL_DIR>
-$ git clone https://github.com/ARISE-Initiative/robosuite.git
-$ cd robosuite
-$ pip install -e .
+make build
 ```
 
-> **Note:** The latest version of dependencies running the `robomimic image` still has compatibility issues, and we are actively working on a fix. The temporary solution is to downgrade the `gym` version to `0.21.0`: pip install setuptools==65.5.0 pip==21, pip install gym==0.21.0
+This builds `cleandiffuser:base` (from `Dockerfile`) and `cleandiffuser:dev`
+(from `Dockerfile.dev`, which adds D4RL from source and pre-compiles
+`mujoco_py`).
 
-Try it now!   
+### 2a. Open in VS Code (devcontainer — recommended)
+
+The repo ships a `.devcontainer/` config. In VS Code with the *Dev Containers*
+extension, run **"Dev Containers: Reopen in Container"**. It mounts the repo at
+`/workspace`, requests all GPUs, and installs the Python/Jupyter extensions.
+`WANDB_API_KEY`, `WANDB_ENTITY`, and `HF_TOKEN` are forwarded from your host
+environment if set (only needed for training/logging, not for evaluation).
+
+### 2b. Or run the container directly
+
 ```bash
-# Tutorial
-$ python tutorials/1_a_minimal_DBC_implementation.py
-# Reinforcement Learning
-$ python pipelines/diffuser_d4rl_mujoco.py
-# Imitation Learning (need to download the dataset, see below)
-$ python pipelines/dp_pusht.py
-```
-If you need to reproduce Imitation Learning environments (`pusht`, `kitchen`, `robomimic`), you need to download the datasets additionally. We recommend downloading the corresponding compressed files from [Datasets](https://diffusion-policy.cs.columbia.edu/data/training/). We provide the default dataset path as `dev/`:
-```bash
-dev/
-.
-├── kitchen
-├── pusht
-├── robomimic
+make run          # interactive shell in cleandiffuser:dev, repo mounted at /workspace
 ```
 
-<!-- TUTORIALS -->
-## 🍷 Tutorials
-
-We will make every effort to provide detailed `tutorials` for beginners in the field of **Diffusion Models in Decision Making**, which is also beneficial for learning the core components of CleanDiffuser and expanding them into new algorithms. **Our vision is not only to offer a benchmark for the community but more importantly, to enable everyone to implement and innovate diffusion algorithms more easily based on CleanDiffuser.**  
-
-> **Note:** In the `tutorials`, we generally only explain and demonstrate individual mechanisms or components, rather than a complete algorithm, and therefore ignore the extra tricks and take just a few minutes of training time. This may cause performance drop, which is normal!
-
-We have now provided the following tutorials and are continuously updating more:
+Verify the GPU is visible:
 
 ```bash
-# Build the DiffusionBC algorithm with minimal code
-python tutorials/1_a_minimal_DBC_implementation.py
-# Customize classifier-free guidance
-python tutorials/2_classifier-free_guidance.py
-# Customize classifier guidance
-python tutorials/3_classifier_guidance.py
-# Customize diffusion network backbone
-python tutorials/4_customize_your_diffusion_network_backbone.py
-
-# Special. Consistency Policies
-python tutorials/sp_consistency_policy.py 
-
+python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
 ```
 
-If you wish to reproduce the results of the paper perfectly, we recommend using the full implementation in `pipelines`.
+### 3. Datasets and checkpoints
 
-<!-- USAGE EXAMPLES -->
-## 💻 Pipelines
+- **D4RL datasets** download automatically on first use and cache to `~/.d4rl`
+  (mounted into the container by the Makefile targets).
+- **Checkpoints are not tracked in git.** The closed-loop scripts expect the
+  frozen DV planner / critic / policy under
+  `results/veteran_d4rl_<family>_.../<env-name>/` (see `mcts/specs.py` for the
+  exact directory per family). Train them with the Makefile's Hydra pipeline
+  targets, e.g.:
 
-The `cleandiffuser` folder contains the core components of the CleanDiffuser codebase, including `Diffusion Models`, `Network Architectures`, and `Guided Sampling`. It also provides unified `Env and Dataset Interfaces`.
+  ```bash
+  make train PIPELINE=veteran_d4rl_maze2d  TASK=maze2d-large-v1
+  make train PIPELINE=veteran_d4rl_kitchen TASK=kitchen-mixed-v0
+  # (make eval PIPELINE=... TASK=... STEP=latest  runs the DV inference baseline)
+  ```
 
-In CleanDiffuser, we can combine independent modules to algorithms pipelines like building blocks. In the `pipelines` folder, we provide all the algorithms currently implemented in CleanDiffuser. By linking with the Hydra configurations in the `configs` folder, you can reproduce the results presented in the papers:
+  The additional models this project introduces are produced by the training
+  scripts and then selected at evaluation time by the flags in brackets:
 
-You can simply run each algorithm with the default environment and configuration without any additional setup, for example:
+  | Model | Train with | Selected at eval by |
+  |---|---|---|
+  | behaviour-return value `V(s)` | `scripts/train_state_value.py` | `--value-mode v_s` |
+  | distilled plan-value `V̂(s)` | `scripts/gen_plan_value_labels.py` → `scripts/train_plan_value.py` | `--value-mode v_s --value-step <tag>` |
+  | goal-conditioned `V(s,g)` | `scripts/train_state_value.py` (goal-cond) | `--value-mode v_sg` / `v_sg_pess` |
+  | stitched-window critic | `scripts/finetune_critic_stitched.py` | `--critic-step stitched` |
+  | causal Diffusion-Forcing planner | `scripts/train_df_planner.py` | `--df-ckpt <tag>` |
+  | per-token noise-aware guidance | `scripts/train_noise_critic.py` | `--cg-ckpt <tag> --cg-w <w>` |
+
+### 4. Smoke test
+
+Confirm the closed loop runs end-to-end before launching anything long:
 
 ```bash
-# DiffusionPolicy with Chi_UNet in lift-ph
-python pipelines/dp_pusht.py
-# Diffuser in halfcheetah-medium-expert-v2
-python pipelines/diffuser_d4rl_mujoco.py
+python scripts/run_mcts_compare.py --env maze2d-large-v1 --method both \
+    --n-envs 4 --n-episodes 1 --budget 6 --max-steps 200
 ```
 
-Thanks to Hydra, CleanDiffuser also supports flexible running of algorithms through CLI or directly modifying the corresponding configuration files. We provide some examples:
+Unit tests (the tree, verifier, scheduling, and window composition are
+torch-free and run anywhere):
 
 ```bash
-# Load PushT config
-python pipelines/dp_pusht.py --config-path=../configs/dp/pusht/dit --config-name=pusht
-# Load PushT config and overwrite some hyperparameters
-python pipelines/dp_pusht.py --config-path=../configs/dp/pusht/dit --config-name=pusht dataset_path=path/to/dataset seed=42 device=cuda:0
-# Train Diffuser in hopper-medium-v2 task
-python pipelines/diffuser_d4rl_mujoco.py task=hopper-medium-v2 
+pytest tests/ -m "not integration"
 ```
 
-In CleanDiffuser, we provide a mode option to switch between **training** `(mode=train)` or **inference** `(mode=inference)` of the model:
+---
+
+## Running the experiments
+
+Every command below saves a result JSON via `--out`. Runs at the same
+`--env` / `--seed` / `--n-envs` are **paired by construction** (shared RNG
+stream → identical start/goal draws), so differences are computed per-rollout;
+pair and compute the seed-level statistics with `scripts/collate_mcts.py` and
+`scripts/seed_level_stats.py`.
+
+Supported envs: `maze2d-large-v1`, `maze2d-medium-v1`, `maze2d-umaze-v1`,
+`antmaze-large-diverse-v2`, `kitchen-mixed-v0`.
+
+### A. Reproduce the flat DV baseline (MCSS)
 
 ```bash
-# Imitation learning environment
-python pipelines/dp_pusht.py mode=inference model_path=path/to/checkpoint
-# Reinforcement learning environment
-python pipelines/diffuser_d4rl_mujoco.py mode=inference ckpt=latest
+# DV MCSS at K=50 and K=256, maze2d-large, 10 seeds
+for s in 0 1 2 3 4 5 6 7 8 9; do
+  python scripts/run_mcts_compare.py --env maze2d-large-v1 --method mcss --k-mcss 50  --seed $s --out results/dv_mcss_k50_s$s.json
+  python scripts/run_mcts_compare.py --env maze2d-large-v1 --method mcss --k-mcss 256 --seed $s --out results/dv_mcss_k256_s$s.json
+done
 ```
 
-<!-- ## 💫 Feature -->
+### B. Trajectory tree on the DV backbone (the tree that loses, and why)
 
+The full-sequence DV planner cannot be conditioned on a prefix exactly, so the
+tree loses here. These arms decompose the failure (node value, backup, and
+expansion fidelity).
 
-
-<!-- Implemented Components -->
-## 🎁 Implemented Components
-
-
-| **Category**                | **Items**                | **Paper**                                                                                                                        |
-|-----------------------------|--------------------------|----------------------------------------------------------------------------------------------------------------------------------|
-| **SDE/ODE with Solvers**    |                          |                                                                                                                                  |
-| *Diffusion SDE*             | DDPM                     | ✅[Denoising Diffusion Probabilistic Models](https://arxiv.org/abs/2006.11239)                                                    |
-|                             | DDIM                     | ✅[Denoising Diffusion Implicit Models](https://arxiv.org/abs/2010.02502)                                                         |
-|                             | DPM-Solver               | ✅[DPM-Solver: A Fast ODE Solver for Diffusion Probabilistic Model Sampling in Around 10 Steps](https://arxiv.org/abs/2206.00927) |
-|                             | DPM-Solver++             | ✅[DPM-Solver++: Fast Solver for Guided Sampling of Diffusion Probabilistic Models](https://arxiv.org/abs/2211.01095)             |
-| *EDM*                       | Eular                    | ✅[Elucidating the Design Space of Diffusion-Based Generative Models](https://arxiv.org/abs/2206.00364)                           |
-|                             | 2nd Order Heun           |                                                                                                                                  |
-| *Recitified Flow*           | Euler                    | ✅[Flow Straight and Fast: Learning to Generate and Transfer Data with Rectified Flow](https://arxiv.org/abs/2209.03003)          |
-| *Consistency Models*        |                          | ✅[Consistency Models](https://arxiv.org/abs/2303.01469)                                                                          |
-|                             |                          |                                                                                                                                  |
-| **Network Architectures**   |                          |                                                                                                                                  |
-|                             | Pearce_MLP               | ✅[Imitating Human Behaviour with Diffusion Models](https://arxiv.org/abs/2301.10677)                                             |                                |
-|                             | Pearce_Transformer       |                                                                                                                                  |
-|                             | Chi_UNet1d               | ✅[Diffusion Policy: Visuomotor Policy Learning via Action Diffusion](https://arxiv.org/abs/2303.04137)                           |                                |
-|                             | Chi_Transformer          |                                                                                                                                  |
-|                             | LNResnet (IDQL_MLP)      | ✅[IDQL: Implicit Q-Learning as an Actor-Critic Method with Diffusion Policies](https://arxiv.org/abs/2304.10573)                 |                                
-|                             | DQL_MLP                  | ✅[Diffusion Policies as an Expressive Policy Class for Offline Reinforcement Learning](https://arxiv.org/abs/2208.06193)         |
-|                             | Janner_UNet1d            | ✅[Planning with Diffusion for Flexible Behavior Synthesis](https://arxiv.org/abs/2205.09991)                                     |                       
-|                             | DiT1d                    | ✅[AlignDiff: Aligning Diverse Human Preferences via Behavior-Customisable Diffusion Model](https://arxiv.org/abs/2310.02054)     |          
-|                             | SfBC_UNet                | ✅[Offline Reinforcement Learning via High-Fidelity Generative Behavior Modeling](https://arxiv.org/abs/2209.14548)               |      
-|                             |                          |                                                                                                                                  |
-| **Guided Sampling Methods** |                          |                                                                                                                                  |
-|                             | Classifier Guidance      | ✅[Diffusion Models Beat GANs on Image Synthesis](https://arxiv.org/abs/2105.05233)                                               |                                 
-|                             | Classifier-free Guidance | ✅[Classifier-Free Diffusion Guidance](https://arxiv.org/abs/2207.12598)                                                          |                                                                 
-|                             |                          |                                                                                                                                  |
-| **Pipelines**               |                          |                                                                                                                                  |
-| *Planners*                  | Diffuser                 | ✅[Planning with Diffusion for Flexible Behavior Synthesis](https://arxiv.org/abs/2205.09991)                                     |
-|                             | Decision Diffuser        | ✅[Is Conditional Generative Modeling all you need for Decision-Making?](https://arxiv.org/abs/2211.15657)                        |
-|                             | AdaptDiffuser            | ✅[AdaptDiffuser: Diffusion Models as Adaptive Self-evolving Planners](https://arxiv.org/abs/2302.01877)                          |
-|                             | DiffuserLite (*New!*)🔥  | ✅[DiffuserLite: Towards Real-time Diffusion Planning](https://arxiv.org/abs/2401.15443)                                          |
-|                             | Diffusion Veteran (*New!*)🔥  | ✅[What Makes a Good Diffusion Planner for Decision Making?](https://openreview.net/forum?id=7BQkXXM8Fy)                                          |
-| *Policies*                  | DQL                      | ✅[Diffusion Policies as an Expressive Policy Class for Offline Reinforcement Learning](https://arxiv.org/abs/2208.06193)         | 
-|                             | EDP                      | ✅[Efficient Diffusion Policies for Offline Reinforcement Learning](https://arxiv.org/abs/2305.20081)                             | 
-|                             | IDQL                     | ✅[IDQL: Implicit Q-Learning as an Actor-Critic Method with Diffusion Policies](https://arxiv.org/abs/2304.10573)                 |
-|                             | SfBC (*New!*)🔥          | ✅[Offline Reinforcement Learning via High-Fidelity Generative Behavior Modeling](https://arxiv.org/abs/2209.14548)               |
-|                             | QGPO (*New!*)🔥          | ✅[Contrastive energy prediction for exact energy-guided diffusion sampling in offline reinforcement learning](https://arxiv.org/abs/2304.12824)|
-|                             | Diffusion Policy         | ✅[Diffusion Policy: Visuomotor Policy Learning via Action Diffusion](https://arxiv.org/abs/2303.04137)                           |                                
-|                             | DiffusionBC              | ✅[Imitating Human Behaviour with Diffusion Models](https://arxiv.org/abs/2301.10677)                                             |                                
-| *Data Synthesizers*         | SynthER                  | ✅[Synthetic Experience Replay](https://arxiv.org/abs/2303.06614)                                                                 |                                
-|                             |                          |                                                                                                                                  |
-
-
-<!-- UNITTEST -->
-## ✅ Unit Tests
-
-All unit tests in `Cleandiffuser` can be run using pytest runner:
 ```bash
-pytest tests/
+# tree with the DV trajectory critic, seam-glue expansion, tempered top-3 backup,
+# root width 50 (a strict superset of the MCSS pool)
+for s in 0 1 2; do
+  python scripts/run_mcts_compare.py --env maze2d-large-v1 --method both \
+    --value-mode critic --expand-mode glue --k-root 50 --k-mcts 16 --budget 15 --top-m 3 \
+    --seed $s --out results/dv_tree_top3_s$s.json
+done
 ```
-To run a single test file:  
+
+Vary **one** knob at a time to reproduce the defect table:
+
 ```bash
-python3 -m pytest -v tests/test_dit.py 
-```  
-> **Note:** Testing the datasets module requires downloading the dataset to a specified location ahead of time.
+# defect 2 — backup:      --top-m 1   (MAX backup)   vs  --top-m 3  (tempered)
+# defect 3 — expansion:   --expand-mode glue          vs  --expand-mode inpaint
+# node value alternatives: --value-mode v_sg  (goal-conditioned, mean)
+#                          --value-mode v_sg_pess  (pessimistic ensemble-min)
+# defect 1 — the value target: behaviour-return vs distilled plan-value are the
+#   same --value-mode v_s, chosen by different --value-step checkpoints.
+```
 
-<!-- CONTRIBUTING -->
-## 🙏 Contributing
+### C. Trajectory tree on the causal Diffusion-Forcing backbone (the tree that wins)
 
-Contributions are what make the open source community such an amazing place to learn, inspire, and create. Any contributions you make are **greatly appreciated**.
+With `--df-ckpt`, **both** arms use the DF backbone: `mcss` becomes DF
+sample-and-rank, `mcts` becomes exact prefix-conditioned expansion.
 
-If you have a suggestion that would make this better, please fork the repo and create a pull request. You can also simply open an issue with the tag "enhancement".
-Don't forget to give the project a star! Thanks again!
+```bash
+for s in 0 1 2 3 4; do
+  python scripts/run_mcts_compare.py --env maze2d-large-v1 --method both \
+    --df-ckpt final --value-mode critic --k-root 50 --k-mcts 16 --budget 15 --top-m 3 \
+    --seed $s --out results/df_both_s$s.json
+done
+# repeat with --env maze2d-medium-v1 / maze2d-umaze-v1 / kitchen-mixed-v0 (use --k-mcss 150 for kitchen)
+```
 
-1. Fork the Project
-2. Create your Feature Branch (`git checkout -b feature/AmazingFeature`)
-3. Commit your Changes (`git commit -m 'Add some AmazingFeature'`)
-4. Push to the Branch (`git push origin feature/AmazingFeature`)
-5. Open a Pull Request
+### D. Shortcut-forcing backbone (the weaker third point for the headroom curve)
 
-<!-- LICENSE -->
-## 🏷️ License
+```bash
+for s in 0 1 2 3 4; do
+  python scripts/run_mcts_compare.py --env maze2d-large-v1 --method both \
+    --df-ckpt <shortcut-tag> --sweeps 8 --value-mode critic --k-root 50 --top-m 3 \
+    --seed $s --out results/short_both_s$s.json
+done
+```
 
-Distributed under the Apache License 2.0. See `LICENSE.txt` for more information.
+### E. FrankaKitchen: guidance and the grounded evaluator (Chapter 5)
 
-<!-- ACKNOWLEDGEMENT -->
-## 💓 Acknowledgement
+```bash
+# DF flat + tree
+python scripts/run_mcts_compare.py --env kitchen-mixed-v0 --method both --df-ckpt final --k-mcss 150 --seed 0 --out results/kitchen_df_s0.json
 
-- [huggingface diffusers](https://github.com/huggingface/diffusers)  
-- [diffuser](https://github.com/jannerm/diffuser)  
-- [diffusion policy](https://github.com/real-stanford/diffusion_policy)  
-- [robomimic](https://github.com/ARISE-Initiative/robomimic)
+# per-token noise-aware classifier guidance on the DF sampler (w = guidance strength)
+python scripts/run_mcts_compare.py --env kitchen-mixed-v0 --method both --df-ckpt final \
+    --cg-ckpt <cg-tag> --cg-w 8 --k-mcss 150 --seed 0 --out results/kitchen_cg8_s0.json
 
-<!-- CONTACT -->
-## ✉️ Contact
+# grounded subtask evaluator (kitchen only) as the tree node value, critic-blended tiebreak
+python scripts/run_mcts_compare.py --env kitchen-mixed-v0 --method mcts --df-ckpt final \
+    --value-mode grounded --grounded-blend 0.25 --k-mcss 150 --seed 0 --out results/kitchen_grounded_s0.json
+```
 
-For any questions, please feel free to email `zibindong@outlook.com` and `yuanyf@tju.edu.cn`.
+### F. Denoising-axis search: Monte Carlo Tree Diffusion (Chapter 4.4)
 
-<!-- CITATION -->
-## 📝 Citation
+`run_mctd.py` uses the periodic-replan MPC harness (Setup 2). MCTD is maze2d /
+antmaze only (its geometric verifier needs a positional goal).
 
-If you find our work useful, please consider citing:
+```bash
+for s in 0 1 2 3 4; do
+  # MCTD as published (geometric verifier)
+  python scripts/run_mctd.py --env maze2d-large-v1 --replan-every 50 --seed $s --out results/mctd_s$s.json
+  # the execution-matched flat control: best-of-K MCSS in the identical harness
+  python scripts/run_mctd.py --env maze2d-large-v1 --flat-mcss --mcss-backbone df --replan-every 50 --seed $s --out results/mctd_ctrl_s$s.json
+done
+
+# ablations (change one component):
+#   --value-mode critic   MCTD with the DV critic instead of the geometric verifier
+#   --guided-bon          flat best-of-N over guidance weights, no tree
+```
+
+### G. Execution-model controls (Chapter 6)
+
+Absolute scores move sharply with the execution setup, so these isolate the
+**target-selection rule** and the **backbone-vs-cadence** gap inside one harness.
+
+```bash
+# target-selection rule isolated on the DF-tree: aim-next (reach-wp 0) vs advance-past (reach-wp 1)
+for s in 0 1 2; do
+  python scripts/run_mctd.py --env maze2d-large-v1 --df-tree --tree-k-root 50 --tree-k 16 --tree-budget 15 --tree-top-m 3 --replan-every 1 --reach-wp 0.0 --seed $s --out results/treerule_aimnext_s$s.json
+  python scripts/run_mctd.py --env maze2d-large-v1 --df-tree --tree-k-root 50 --tree-k 16 --tree-budget 15 --tree-top-m 3 --replan-every 1 --reach-wp 1.0 --seed $s --out results/treerule_advance_s$s.json
+done
+
+# backbone-vs-cadence: DV and DF flat MCSS in the same MPC harness at matched cadence
+python scripts/run_mctd.py --env maze2d-large-v1 --flat-mcss --mcss-backbone dv --replan-every 50 --seed 0 --out results/cad_dv_rp50_s0.json
+python scripts/run_mctd.py --env maze2d-large-v1 --flat-mcss --mcss-backbone df --replan-every 50 --seed 0 --out results/cad_df_rp50_s0.json
+```
+
+---
+
+## Command reference (what each flag does)
+
+### Shared / scale
+
+| Flag | What it is | Changing it |
+|---|---|---|
+| `--env` | D4RL environment | `maze2d-{large,medium,umaze}-v1`, `antmaze-large-diverse-v2`, `kitchen-mixed-v0`. Picks the checkpoint family and geometry automatically. |
+| `--seed` | RNG seed = unit of replication | Fixes the whole set of start/goal draws; different seeds give paired repeats. Confirmed claims use ≥3 seeds. |
+| `--n-envs` | parallel environments per seed | More envs = a tighter per-seed mean but more GPU memory. Default 25. |
+| `--n-episodes` | episodes per env | Usually 1 (maze2d/kitchen). |
+| `--max-steps` | cap episode length | Lower it (e.g. 200) to smoke-test; default = the env's own time limit. |
+| `--out` | result JSON path | Where the per-rollout scores + config are saved. |
+| `--dv-log` | print DV-style inference log | Emits the base system's per-step log and DV-exact score. |
+
+### `run_mcts_compare.py` — trajectory-axis tree
+
+| Flag | What it is | Changing it |
+|---|---|---|
+| `--method` | which arm(s) to run | `mcss` (flat), `mcts` (tree), or `both` (paired). |
+| `--k-mcss` | flat MCSS candidate count | The flat pool size (50 default, 256 for the width control, 150 on kitchen). Wider ≈ flat "best-of-more". |
+| `--k-mcts` | candidates per expansion | Fan-out at each expanded node. Higher = wider per-node search, more planner calls (cost); returns saturate by ~16. |
+| `--k-root` | root expansion width | The pool the executed action is chosen from — set `50` to make the root a strict superset of MCSS. Default = `--k-mcts`. |
+| `--budget` | expansion rounds | Tree depth/size budget. More rounds = a bigger tree at linear cost; the search budget has the smallest effect on the score. |
+| `--top-m` | backup = mean of top-m children | `1` = MAX backup (optimistic, overestimates on noisy scores); `>1` tempers it. `3` is the default tempered value. |
+| `--child-index` | segment length per edge | Which continuation index becomes the child state (edge length L). |
+| `--c-ucb` | UCB exploration constant | Higher explores rarely-visited children more. Default √2. |
+| `--value-mode` | tree node value (mcts arm) | `critic` (DV trajectory critic), `v_s` (per-state value), `v_sg` / `v_sg_pess` (goal-conditioned mean / pessimistic-min), `grounded` (kitchen subtask count, non-learned). |
+| `--value-step` | value checkpoint tag | Selects which `V(s)` checkpoint — this is how behaviour-return vs distilled plan-value are switched. |
+| `--pess-beta` | pessimism strength | For the `mean − β·std` variant. |
+| `--expand-mode` | prefix-conditioning method | `glue` (continuation from the leaf state, concatenated — leaves a seam) vs `inpaint` (prefix clamped into the denoiser — no seam but off-distribution for a full-sequence net). |
+| `--df-ckpt` | DF planner checkpoint tag | Switches **both** arms to the causal Diffusion-Forcing backbone (`df_planner_ckpt_<tag>.pt`); enables exact prefix conditioning. |
+| `--sweeps` | shortcut sampling sweeps | Shortcut backbone only — a power of 2 (e.g. `8`); fewer sweeps = faster, lower-quality sampling. |
+| `--df-slope` | pyramid schedule slope | Extra noise levels per future token in the DF schedule. |
+| `--cg-ckpt` / `--cg-w` | noise-aware guidance | `--cg-ckpt` picks the per-token guidance model; `--cg-w` is its strength (`0` = off). Needs `--df-ckpt` (guidance steers the DF sampler). |
+| `--grounded-blend` | grounded tiebreak weight | Weight of the DV critic added on top of the grounded subtask count (`0` = pure grounded). |
+| `--grounded-mcss` | grounded rerank of MCSS | `1` reranks flat candidates by the grounded checker instead of the critic (kitchen only). |
+| `--junction-filter` / `--junction-pct` | implausible-hop guard | Reject tree children whose first step exceeds the `--junction-pct` percentile of dataset stride. |
+| `--critic-step` | critic checkpoint | An int step, or `stitched` to load the stitched-window fine-tuned critic. |
+| `--rebase-policy` | policy-input rebasing | `0/1`; default follows the DV config per family (kitchen = 0, its first dims are joint angles not xy). |
+
+### `run_mctd.py` — denoising-axis search + MPC controls
+
+Selects the arm by flag: **default** = faithful MCTD; `--flat-mcss` = flat
+control; `--guided-bon` = guided best-of-N; `--df-tree` = this project's
+trajectory tree run inside the same MPC harness.
+
+| Flag | What it is | Changing it |
+|---|---|---|
+| `--replan-every` | env-steps between replans | The MPC cadence (Setup 2). `1` = replan every step; `50` = the reference open-loop horizon. Strongly affects absolute score. |
+| `--reach-wp` | waypoint-advance threshold | The **target-selection rule**: `0.0` aims at the next waypoint (aim-next); `1.0` advances past waypoints already reached (advance-past). |
+| `--guidance` | MCTD meta-action menu | The set of guidance scales the denoising tree chooses among (default `0 0.1 0.5 1 2`). |
+| `--n-depths` | denoising-tree depth | Number of denoising blocks = tree depth. |
+| `--max-search` | expansions per plan | MCTD search budget per replan. |
+| `--skip` | jumpy-rollout stride | Stride of the fast rollout that scores a node. |
+| `--value-mode` | MCTD node value | `geometric` (non-learned goal-reach verifier, as published) or `critic` (DV trajectory critic on the clean plan). |
+| `--flat-mcss` / `--k` | flat control | Run best-of-`--k` MCSS in the identical MPC harness (isolates search from the execution model). |
+| `--mcss-backbone` | control planner | `df` (MCTD's backbone) or `dv` (the frozen SOTA planner — separates the backbone gap from the cadence gap). |
+| `--guided-bon` / `--k-per` | guided best-of-N | Flat best-of-N over guidance weights, no tree; `--k-per` plans per weight. |
+| `--df-tree` + `--tree-{budget,k,k-root,top-m}` | the trajectory tree in the MPC harness | Runs this project's DF-tree at `--replan-every`, making it raw-comparable to MCTD. The `--tree-*` knobs mirror `--budget` / `--k-mcts` / `--k-root` / `--top-m` above. |
+| `--df-ckpt` | DF checkpoint tag | `df_planner_ckpt_<tag>.pt` (default `final`). |
+
+---
+
+## Repository layout
+
+```
+mcts/          tree search, node value functions, expansion mechanisms,
+               causal DF + shortcut planners, per-token guidance, MCTD port
+scripts/       experiment drivers (run_mcts_compare.py, run_mctd.py),
+               training, analysis/collation, figure generation
+pipelines/     Hydra training/inference pipelines for the DV base system
+cleandiffuser/ the upstream CleanDiffuser library (diffusion models, datasets)
+tests/         unit tests (tree/verifier/scheduling are torch-free) + GPU smoke tests
+results/       result JSONs (checkpoints live here too, but are git-ignored)
+```
+
+---
+
+## Acknowledgement and attribution
+
+This work is built on **[CleanDiffuser](https://github.com/CleanDiffuserTeam/CleanDiffuser)**
+and its **Diffusion Veteran** planner
+([*What Makes a Good Diffusion Planner for Decision Making?*](https://openreview.net/forum?id=7BQkXXM8Fy)),
+and uses the **[D4RL](https://github.com/Farama-Foundation/D4RL)** benchmarks.
+The CleanDiffuser library retains its original Apache License 2.0 (see
+`LICENSE.txt`). The `mcts/` package, the experiment drivers and analysis tooling
+in `scripts/`, and the evaluation harness are contributions of this dissertation.
+
 ```
 @article{cleandiffuser,
-  author = {Zibin Dong and Yifu Yuan and Jianye Hao and Fei Ni and Yi Ma and Pengyi Li and Yan Zheng},
-  title = {CleanDiffuser: An Easy-to-use Modularized Library for Diffusion Models in Decision Making},
+  author  = {Zibin Dong and Yifu Yuan and Jianye Hao and Fei Ni and Yi Ma and Pengyi Li and Yan Zheng},
+  title   = {CleanDiffuser: An Easy-to-use Modularized Library for Diffusion Models in Decision Making},
   journal = {arXiv preprint arXiv:2406.09509},
-  year = {2024},
-  url = {https://arxiv.org/abs/2406.09509},
+  year    = {2024},
+  url     = {https://arxiv.org/abs/2406.09509},
 }
 ```

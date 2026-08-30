@@ -1,7 +1,12 @@
 dev_pipelines/
-scripts/
+# scripts/ was upstream (CleanDiffuser) scratch space; here it holds the
+# dissertation's experiment tooling and MUST be version-controlled.
 outputs/
-/results
+# Keep checkpoints/datasets out of git, but track the small top-level result
+# JSONs (the experiment cells the write-ups cite). Subdirs (checkpoint trees,
+# phase CSV dumps) stay ignored.
+/results/*
+!/results/*.json
 /video_outputs
 /wandb
 # *.ipynb
@@ -22,6 +27,9 @@ log_files2/
 log_files_eval/
 mlogger_test.json
 mujoco210-linux-x86_64.tar.gz
+# self-backup archive (875MB snapshot of this repo) — never commit
+*.rar
+mcts_diffusion_back.rar
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -187,3 +195,18 @@ D4RL/
 
 # claude
 .claude
+
+# ─────────────────────────────────────────────────────────────────────────
+# DISSERTATION MATERIAL — deliberately NOT pushed to GitHub.
+# Chapter drafts, research notes, generated figures and submitted reports stay
+# local until the dissertation is submitted and marked. The code that produces
+# them (mcts/, scripts/, pipelines/) IS tracked, so the repo stays reproducible.
+#
+# These paths were never committed, so there is nothing in git history to purge.
+# To publish one of them later, either delete its line here or force-add the
+# single file:   git add -f notes/NEXT_STEPS_RUNBOOK.md
+# ─────────────────────────────────────────────────────────────────────────
+/dissertation/
+/notes/
+/figures/
+*.docx

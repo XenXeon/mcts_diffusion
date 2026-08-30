@@ -1,0 +1,80 @@
+[
+  {
+    "method": "DV-MCSS",
+    "env": "maze2d-umaze-v1",
+    "seed": 0,
+    "normalized_score": 114.6,
+    "raw_return": 182.0,
+    "goal_step": 118,
+    "episode_length": 300,
+    "denoising_calls": 9000,
+    "wall_seconds": 28.62,
+    "ms_per_step": 95.4,
+    "git_commit": "5ae067313c2ffe1b7211208edb7bdc2a3db0e529"
+  },
+  {
+    "method": "DV-MCSS",
+    "env": "maze2d-umaze-v1",
+    "seed": 0,
+    "normalized_score": 114.59,
+    "raw_return": 182.0,
+    "goal_step": 118,
+    "episode_length": 300,
+    "denoising_calls": 9000,
+    "wall_seconds": 34.93,
+    "ms_per_step": 116.4,
+    "git_commit": "5ae067313c2ffe1b7211208edb7bdc2a3db0e529"
+  },
+  {
+    "method": "DV-MCSS",
+    "env": "maze2d-umaze-v1",
+    "seed": 1,
+    "normalized_score": 68.94,
+    "raw_return": 119.0,
+    "goal_step": 181,
+    "episode_length": 300,
+    "denoising_calls": 9000,
+    "wall_seconds": 28.08,
+    "ms_per_step": 93.6,
+    "git_commit": "5ae067313c2ffe1b7211208edb7bdc2a3db0e529"
+  },
+  {
+    "method": "DV-MCSS",
+    "env": "maze2d-umaze-v1",
+    "seed": 2,
+    "normalized_score": 121.84,
+    "raw_return": 192.0,
+    "goal_step": 108,
+    "episode_length": 300,
+    "denoising_calls": 9000,
+    "wall_seconds": 30.79,
+    "ms_per_step": 102.6,
+    "git_commit": "5ae067313c2ffe1b7211208edb7bdc2a3db0e529"
+  },
+  {
+    "method": "DV-MCSS",
+    "env": "maze2d-umaze-v1",
+    "seed": 3,
+    "normalized_score": 112.42,
+    "raw_return": 179.0,
+    "goal_step": 121,
+    "episode_length": 300,
+    "denoising_calls": 9000,
+    "wall_seconds": 33.55,
+    "ms_per_step": 111.8,
+    "git_commit": "5ae067313c2ffe1b7211208edb7bdc2a3db0e529"
+  },
+  {
+    "method": "DV-MCSS",
+    "env": "maze2d-umaze-v1",
+    "seed": 4,
+    "normalized_score": 118.22,
+    "raw_return": 187.0,
+    "goal_step": 113,
+    "episode_length": 300,
+    "denoising_calls": 9000,
+    "wall_seconds": 30.46,
+    "ms_per_step": 101.5,
+    "git_commit": "5ae067313c2ffe1b7211208edb7bdc2a3db0e529"
+  }
+]

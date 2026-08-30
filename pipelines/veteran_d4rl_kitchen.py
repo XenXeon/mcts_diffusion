@@ -451,6 +451,11 @@ def pipeline(args):
         mean = np.mean(episode_rewards)
         err = np.std(episode_rewards) / np.sqrt(len(episode_rewards))
         print(mean, err)
+        # per-rollout distribution (25 pts = 1 subtask): feeds the 4-task
+        # census (results_chapter §7) — a single 100 here would falsify the
+        # demonstration-ceiling claim, which is what makes it worth printing.
+        u, c = np.unique(np.round(episode_rewards).astype(int), return_counts=True)
+        print("per-rollout distribution:", dict(zip(u.tolist(), c.tolist())))
 
         if args.enable_wandb:
             wandb.log({'Mean Reward': mean, 'Error': err})

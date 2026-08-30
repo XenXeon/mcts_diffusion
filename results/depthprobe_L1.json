@@ -1,0 +1,81 @@
+{
+  "env": "antmaze-large-diverse-v2",
+  "seed": 0,
+  "n_envs": 4,
+  "n_episodes": 1,
+  "max_steps": 40,
+  "budget": 16,
+  "k_mcts": 16,
+  "k_mcss": 50,
+  "child_index": 1,
+  "c_ucb": 1.4142136,
+  "value_step": "latest",
+  "planner_step": 1000000,
+  "critic_step": 1000000,
+  "policy_step": 1000000,
+  "ckpt_dir": "results/veteran_d4rl_antmaze_H40_Jump25_next1_MCSS_transformer_d8_width256_separate_dp1/antmaze-large-diverse-v2",
+  "max_path_length": 1000,
+  "git_commit": "22da79454bf7d779886daa845739f96f801e1393",
+  "timestamp": "2026-06-12 10:54:15",
+  "results": {
+    "mcts": {
+      "method": "mcts",
+      "n_rollouts": 4,
+      "reach_pct": 0.0,
+      "reach_err": 0.0,
+      "norm_mean": 0.0,
+      "norm_err": 0.0,
+      "wall_s": 156.6,
+      "success": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "reach_step": [
+        null,
+        null,
+        null,
+        null
+      ],
+      "starts": [
+        [
+          0.09544437285301235,
+          0.04781629791951386
+        ],
+        [
+          0.09843100876339111,
+          -0.051256282244629414
+        ],
+        [
+          -0.06906706689134408,
+          0.07996101901894967
+        ],
+        [
+          -0.053951288112832785,
+          -0.03391913413355285
+        ]
+      ],
+      "goals": [
+        [
+          32.409297943115234,
+          25.26762580871582
+        ],
+        [
+          33.20935821533203,
+          25.189422607421875
+        ],
+        [
+          32.1899528503418,
+          25.112255096435547
+        ],
+        [
+          32.65412521362305,
+          24.80177879333496
+        ]
+      ],
+      "tree_depth_mean": 2.79,
+      "tree_depth_max": 4
+    }
+  }
+}
